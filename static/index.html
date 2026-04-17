@@ -66,11 +66,11 @@
 
 <header>
   <h1>Flashcards AI
-    <span id="ai-badge" class="badge off">AI Mock</span>
-    <span id="blob-badge" class="badge off">Local uploads</span>
+    <span id="ai-badge" class="badge off" title="AI status — switches to ON once configured">AI Mock</span>
+    <span id="blob-badge" class="badge off" title="Image storage — switches to Cloud when deployed">Local uploads</span>
   </h1>
-  <div class="me">Studying as:
-    <input id="me-input" value="" placeholder="your name" />
+  <div class="me">Your name:
+    <input id="me-input" value="" placeholder="pick any name" title="Used only for the leaderboard — no account needed" />
     <span id="me-streak"></span>
   </div>
 </header>
@@ -84,21 +84,21 @@
 
   <aside>
     <div class="panel leaderboard">
-      <h3>🔥 Top Streaks</h3>
+      <h3>🔥 Top Day Streaks</h3>
+      <div class="hint" style="margin-bottom:6px">Consecutive days reviewed (resets if a day is skipped).</div>
       <table id="leaderboard-tbl"><tbody></tbody></table>
       <div class="hint" id="no-reviews" style="display:none">Review a card to appear here.</div>
     </div>
     <div class="panel">
-      <h3>How this app works</h3>
-      <ol style="padding-left: 18px; font-size: .88rem;">
-        <li>Pre-seeded decks show the study flow. Delete them any time.</li>
-        <li>Add cards manually, or paste study notes and click <b>AI Generate</b>.</li>
-        <li>Attach images: pick a <b>seed diagram</b> or upload your own.</li>
-        <li>Streaks track consecutive days of review — powered by the cache layer.</li>
+      <h3>Getting started</h3>
+      <ol style="padding-left: 18px; font-size: .88rem; line-height: 1.5;">
+        <li>Pick any <b>name</b> in the top-right — that's how you'll appear on the leaderboard.</li>
+        <li>Open a deck and click <b>Study ▶</b> to review the cards that are due today.</li>
+        <li>For each card, try to recall the answer, then click <b>Show answer</b> and rate how well you knew it.</li>
+        <li>Come back tomorrow! Reviewing every day grows your streak 🔥.</li>
       </ol>
-      <div class="hint">
-        Swap the in-memory <code>store.py</code> / <code>cache.py</code> / <code>blob.py</code>
-        for managed Postgres, Valkey, and Azure Blob on Embr — see each file's docstring.
+      <div class="hint" style="margin-top:8px">
+        <b>Tip:</b> Build your own deck with the <b>New deck</b> form, then add cards one at a time — or paste a passage of notes and let <b>AI Generate</b> do it for you.
       </div>
     </div>
   </aside>
@@ -120,7 +120,7 @@ const esc = s => { const d = document.createElement('div'); d.textContent = s ??
 let currentDeckId = null;
 let studyState = null;
 
-// ── Username handling (client-side — swap for real auth in production) ──
+// ── Username (used as a leaderboard handle, stored locally) ──
 function username() { return (el('me-input').value || '').trim() || 'anonymous'; }
 el('me-input').value = localStorage.getItem('flashcards_user') || '';
 el('me-input').addEventListener('change', () => {
@@ -131,7 +131,7 @@ el('me-input').addEventListener('change', () => {
 // ── Health / feature flags ──
 fetch(`${API}/health`).then(r => r.json()).then(d => {
   if (d.ai_enabled) { el('ai-badge').className = 'badge on'; el('ai-badge').textContent = 'AI ON'; }
-  if (d.embr_blob_enabled) { el('blob-badge').className = 'badge on'; el('blob-badge').textContent = 'Embr Blob'; }
+  if (d.embr_blob_enabled) { el('blob-badge').className = 'badge on'; el('blob-badge').textContent = 'Cloud uploads'; }
 }).catch(() => {});
 
 // ── Deck list view ──
@@ -145,6 +145,10 @@ async function renderDeckList() {
   el('decks-view').innerHTML = `
     <div class="panel">
       <h2>Your Decks</h2>
+      <div class="hint" style="margin-bottom:10px">
+        Click a deck to study it, add new cards, or generate cards from a passage of notes.
+        ${decks.length ? `You have <b>${decks.reduce((n,d) => n + d.due_count, 0)}</b> card(s) due across all decks today.` : 'Create your first deck below to get started.'}
+      </div>
       ${decks.map(d => `
         <div class="deck-card" onclick="openDeck('${d.id}')">
           <h3>${esc(d.title)}</h3>
@@ -205,12 +209,13 @@ async function openDeck(id) {
     </div>
 
     <div class="panel">
-      <h3>Add card manually</h3>
+      <h3>Add a card manually</h3>
+      <p class="hint">Type the question (front) and answer (back). Optionally attach an image to make it easier to remember.</p>
       <form onsubmit="return addCard(event, '${id}')">
         <input id="new-card-front" placeholder="Front (question)" required />
         <textarea id="new-card-back" placeholder="Back (answer)" required></textarea>
 
-        <div class="hint">Optional image — pick a seed diagram or upload your own:</div>
+        <div class="hint">Optional image — pick a sample diagram, or upload your own (PNG, JPG, SVG, GIF, or WebP up to 5 MB):</div>
         <div class="seed-gallery" id="seed-gallery">
           ${SEED_DIAGRAMS.map(url => `<img src="${url}" data-url="${url}" onclick="selectSeed(this)" title="${url.split('/').pop()}"/>`).join('')}
         </div>
@@ -226,8 +231,7 @@ async function openDeck(id) {
 
     <div class="panel">
       <h3>Generate cards with AI</h3>
-      <p class="hint">Paste a passage of study material — the app will turn it into Q/A cards.
-        ${/* mock by default */''}<em>(Mock output until <code>AZURE_OPENAI_*</code> env vars are set.)</em></p>
+      <p class="hint">Paste a passage of study material — notes, a textbook chapter, a lecture transcript — and the app will turn it into question/answer cards for you. <span id="ai-mode-note"><em>(Currently using sample placeholder cards. Once an AI provider is connected, this will produce real cards from your text.)</em></span></p>
       <form onsubmit="return aiGenerate(event, '${id}')">
         <textarea id="ai-passage" placeholder="Paste your notes, textbook passage, or lecture transcript..." required></textarea>
         <div class="row">
@@ -372,11 +376,12 @@ function renderStudyCard(finishedMessage) {
     </div>
     <div class="panel study-card">${body}
       ${studyState.showingBack ? `
+        <div class="hint" style="text-align:center; margin-top:8px">How well did you know this? Your rating decides when you'll see this card again.</div>
         <div class="rating-row">
-          <button class="btn rating-again" onclick="rate('again')">Again</button>
-          <button class="btn rating-hard"  onclick="rate('hard')">Hard</button>
-          <button class="btn rating-good"  onclick="rate('good')">Good</button>
-          <button class="btn rating-easy"  onclick="rate('easy')">Easy</button>
+          <button class="btn rating-again" onclick="rate('again')" title="Didn't remember — show this card again very soon">Again</button>
+          <button class="btn rating-hard"  onclick="rate('hard')"  title="Got it, but it was tough — short interval">Hard</button>
+          <button class="btn rating-good"  onclick="rate('good')"  title="Knew it — normal interval">Good</button>
+          <button class="btn rating-easy"  onclick="rate('easy')"  title="Way too easy — long interval before next review">Easy</button>
         </div>` :
         `<div class="rating-row"><button class="btn primary" onclick="flipCard()">Show answer</button></div>`
       }
@@ -407,13 +412,13 @@ async function refreshLeaderboard() {
   }
   el('no-reviews').style.display = 'none';
   tbody.innerHTML = entries.map(e =>
-    `<tr class="${e.username === me ? 'me' : ''}"><td>${e.rank}</td><td>${esc(e.username)}</td><td style="text-align:right">${e.streak}🔥</td></tr>`
+    `<tr class="${e.username === me ? 'me' : ''}"><td>${e.rank}</td><td>${esc(e.username)}</td><td style="text-align:right">${e.streak} ${e.streak === 1 ? 'day' : 'days'} 🔥</td></tr>`
   ).join('');
 }
 
 async function refreshStats() {
   const data = await (await fetch(`${API}/stats?username=${encodeURIComponent(username())}`)).json();
-  el('me-streak').textContent = data.streak ? ` — ${data.streak}🔥` : '';
+  el('me-streak').textContent = data.streak ? ` — ${data.streak}-day streak 🔥` : '';
 }
 
 // ── Boot ──
