@@ -141,33 +141,56 @@ async function renderDeckList() {
   el('study-view').style.display = 'none';
   el('decks-view').style.display = 'block';
 
-  const decks = await (await fetch(`${API}/decks`)).json();
+  // Render the "New deck" form FIRST so users can always create a deck
+  // even if the API is slow or returns an error. The deck list below it
+  // gets filled in once the fetch completes.
   el('decks-view').innerHTML = `
     <div class="panel">
-      <h2>Your Decks</h2>
-      <div class="hint" style="margin-bottom:10px">
-        Click a deck to study it, add new cards, or generate cards from a passage of notes.
-        ${decks.length ? `You have <b>${decks.reduce((n,d) => n + d.due_count, 0)}</b> card(s) due across all decks today.` : 'Create your first deck below to get started.'}
-      </div>
-      ${decks.map(d => `
-        <div class="deck-card" onclick="openDeck('${d.id}')">
-          <h3>${esc(d.title)}</h3>
-          <div class="meta">
-            ${esc(d.subject || 'No subject')} — ${d.card_count} cards
-            ${d.due_count > 0 ? `<span class="due">${d.due_count} due</span>` : ''}
-          </div>
-          <div class="meta">${esc(d.description)}</div>
-        </div>`).join('') || '<p>No decks yet.</p>'}
-    </div>
-    <div class="panel">
-      <h3>New deck</h3>
+      <h3>Create a new deck</h3>
+      <p class="hint">Group related cards together (e.g. "Spanish Verbs", "AP Biology Chapter 3").</p>
       <form onsubmit="return newDeck(event)">
         <input id="new-deck-title" placeholder="Title (e.g. Spanish Verbs)" required />
         <input id="new-deck-subject" placeholder="Subject (optional)" />
         <input id="new-deck-desc" placeholder="Description (optional)" />
         <button class="btn primary" type="submit">Create deck</button>
       </form>
+    </div>
+    <div class="panel" id="decks-panel">
+      <h2>Your Decks</h2>
+      <div class="hint">Loading…</div>
     </div>`;
+
+  let decks;
+  try {
+    const res = await fetch(`${API}/decks`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    decks = await res.json();
+    if (!Array.isArray(decks)) throw new Error('Unexpected response from server');
+  } catch (e) {
+    el('decks-panel').innerHTML = `
+      <h2>Your Decks</h2>
+      <div class="error">Couldn't load decks (${esc(e.message)}). Try refreshing the page.</div>`;
+    return;
+  }
+
+  const totalDue = decks.reduce((n, d) => n + (d.due_count || 0), 0);
+  el('decks-panel').innerHTML = `
+    <h2>Your Decks</h2>
+    <div class="hint" style="margin-bottom:10px">
+      Click a deck to study it, add new cards, or generate cards from a passage of notes.
+      ${decks.length
+        ? `You have <b>${totalDue}</b> card(s) due across all decks today.`
+        : 'Use the form above to create your first deck.'}
+    </div>
+    ${decks.map(d => `
+      <div class="deck-card" onclick="openDeck('${d.id}')">
+        <h3>${esc(d.title)}</h3>
+        <div class="meta">
+          ${esc(d.subject || 'No subject')} — ${d.card_count} cards
+          ${d.due_count > 0 ? `<span class="due">${d.due_count} due</span>` : ''}
+        </div>
+        <div class="meta">${esc(d.description)}</div>
+      </div>`).join('') || '<p class="hint">No decks yet.</p>'}`;
 }
 
 async function newDeck(ev) {
