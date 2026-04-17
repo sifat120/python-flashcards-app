@@ -241,6 +241,16 @@ class _MemoryStore:
     def due_count(self, deck_id: str) -> int:
         return sum(1 for c in self.list_cards(deck_id) if c.is_due())
 
+    def deck_counts(self) -> dict[str, tuple[int, int]]:
+        """Return ``{deck_id: (card_count, due_count)}`` for every deck in a
+        single pass. Used by the deck-list endpoint to avoid N+1 queries."""
+        with self._lock:
+            out: dict[str, tuple[int, int]] = {}
+            for deck_id, card_ids in self._cards_by_deck.items():
+                cards = [self._cards[c] for c in card_ids]
+                out[deck_id] = (len(cards), sum(1 for c in cards if c.is_due()))
+            return out
+
 
 # ── Postgres backend (SQLAlchemy) ────────────────────────────────────────────
 
@@ -255,7 +265,9 @@ def _build_db_store():
         ForeignKey,
         Integer,
         String,
+        case,
         create_engine,
+        func,
         select,
     )
     from sqlalchemy.orm import declarative_base, sessionmaker
@@ -484,13 +496,29 @@ def _build_db_store():
         def due_count(self, deck_id: str) -> int:
             today = date.today()
             with Session() as s:
-                rows = s.execute(
-                    select(_CardRow.id).where(
+                return int(s.execute(
+                    select(func.count(_CardRow.id)).where(
                         _CardRow.deck_id == deck_id,
                         _CardRow.next_review <= today,
                     )
+                ).scalar_one() or 0)
+
+        def deck_counts(self) -> dict[str, tuple[int, int]]:
+            """Single-query batch fetch of (card_count, due_count) per deck.
+            Avoids the N+1 round-trips you'd get from calling list_cards() and
+            due_count() once per deck in /api/decks."""
+            today = date.today()
+            with Session() as s:
+                rows = s.execute(
+                    select(
+                        _CardRow.deck_id,
+                        func.count(_CardRow.id),
+                        func.sum(
+                            case((_CardRow.next_review <= today, 1), else_=0)
+                        ),
+                    ).group_by(_CardRow.deck_id)
                 ).all()
-                return len(rows)
+            return {r[0]: (int(r[1] or 0), int(r[2] or 0)) for r in rows}
 
     return _DBStore()
 

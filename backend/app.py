@@ -70,21 +70,33 @@ async def health():
 
 # ── Decks ────────────────────────────────────────────────────────────────────
 
-def _deck_to_out(deck) -> DeckOut:
+def _deck_to_out(deck, card_count: int | None = None, due_count: int | None = None) -> DeckOut:
+    # When counts aren't provided, fall back to per-deck queries (used by
+    # single-deck endpoints). The list endpoint passes pre-computed counts
+    # from store.deck_counts() to avoid N+1 round-trips on Postgres.
+    if card_count is None:
+        card_count = len(store.list_cards(deck.id))
+    if due_count is None:
+        due_count = store.due_count(deck.id)
     return DeckOut(
         id=deck.id,
         title=deck.title,
         description=deck.description,
         subject=deck.subject,
-        card_count=len(store.list_cards(deck.id)),
-        due_count=store.due_count(deck.id),
+        card_count=card_count,
+        due_count=due_count,
         created_at=deck.created_at,
     )
 
 
 @app.get("/api/decks", response_model=list[DeckOut])
 async def list_decks():
-    return [_deck_to_out(d) for d in store.list_decks()]
+    decks = store.list_decks()
+    counts = store.deck_counts()
+    return [
+        _deck_to_out(d, *counts.get(d.id, (0, 0)))
+        for d in decks
+    ]
 
 
 @app.post("/api/decks", response_model=DeckOut, status_code=201)
