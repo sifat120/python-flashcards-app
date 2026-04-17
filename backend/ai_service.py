@@ -11,8 +11,11 @@ To enable real AI:
 
 from __future__ import annotations
 
-import json
+import json  # noqa: F401  (used by the real-implementation block below)
+import logging
 import os
+
+logger = logging.getLogger(__name__)
 
 
 def is_ai_enabled() -> bool:
@@ -51,7 +54,10 @@ async def generate_cards(passage: str, count: int = 5) -> tuple[list[dict], str]
     count = max(1, min(count, 20))
 
     if not is_ai_enabled():
+        logger.debug("ai_service: mock generator (AZURE_OPENAI_* not configured)")
         return _MOCK_CARDS[:count], "mock"
+
+    logger.debug("ai_service: real generator (azure_openai), count=%d", count)
 
     # ── Real implementation (uncomment when ready) ──────────────────────────
     # from openai import AsyncAzureOpenAI

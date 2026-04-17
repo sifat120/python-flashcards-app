@@ -60,7 +60,7 @@ Each backing service has two interchangeable backends. The right one is selected
 |--------------|-----------------------|--------------------------------------------------------------|------|
 | Database     | In-memory dict        | Managed Postgres → `DATABASE_URL`                            | [`backend/store.py`](backend/store.py) |
 | Cache        | In-memory dict        | Managed Valkey/Redis → `REDIS_URL` / `CACHE_URL`             | [`backend/cache.py`](backend/cache.py) |
-| Blob storage | Local `uploads/` dir  | Auto-provisioned blob → `EMBR_BLOB_KEY` + `/_embr/blob/{key}` | [`backend/blob.py`](backend/blob.py) |
+| Blob storage | Local `uploads/` dir  | Auto-provisioned blob → `EMBR_BLOB_KEY` + `EMBR_DOMAIN`, served at `/_embr/blob/{key}` | [`backend/blob.py`](backend/blob.py) |
 | AI           | Mock card generator   | Azure OpenAI → `AZURE_OPENAI_*` set via CLI                  | [`backend/ai_service.py`](backend/ai_service.py) |
 
 ### Database
@@ -83,7 +83,12 @@ export DATABASE_URL="postgresql://user:pass@localhost:5432/flashcards"   # bash
 
 ### Blob storage
 
-Embr auto-provisions blob storage for every environment — no `embr.yaml` toggle needed. `EMBR_BLOB_KEY` is injected at runtime. Until you wire `backend/blob.py` to write to `https://<env>/_embr/blob/{key}`, image uploads land in the local `backend/uploads/` directory and are served by the app at `/uploads/{key}` (works on Embr too, but isn't durable across redeploys).
+Embr auto-provisions blob storage for every environment — no `embr.yaml` toggle needed. `backend/blob.py` selects its backend at import time:
+
+- **On Embr** (`EMBR_BLOB_KEY` set): uploads `PUT https://<env-domain>/_embr/blob/images/{uuid}.{ext}` with `Authorization: Bearer ${EMBR_BLOB_KEY}` and returns the same-domain path `/_embr/blob/{key}`. Reads are public and served directly by the Embr platform proxy (no app round-trip).
+- **Locally** (no `EMBR_BLOB_KEY`): uploads land in `backend/uploads/` and the app serves them at `/uploads/{key}`.
+
+Both paths enforce a 5 MB cap and an allow-list of `png/jpg/jpeg/webp/svg/gif`.
 
 ### AI
 
@@ -99,6 +104,7 @@ The mock generator in `backend/ai_service.py` runs by default. To switch to Azur
 | `DATABASE_URL` | When `database.enabled: true` (managed Postgres) |
 | `REDIS_URL` / `CACHE_URL` | When `cache.enabled: true` (managed Valkey) |
 | `EMBR_BLOB_KEY` | Always — blob storage is auto-provisioned per environment |
+| `EMBR_DOMAIN` | Always — used by `backend/blob.py` to form blob upload URLs |
 | `EMBR_ENVIRONMENT`, `EMBR_PROJECT_ID` | Always |
 
 ### Setting your own (OpenAI key, third-party APIs)
@@ -148,6 +154,33 @@ export AZURE_OPENAI_DEPLOYMENT="..."
 export REDIS_URL="redis://127.0.0.1:6379"
 ```
 
+## Logging
+
+The app sets up structured logging on import via [`backend/logging_config.py`](backend/logging_config.py) — every module just does `logger = logging.getLogger(__name__)` and inherits the same format and level. Logs go to **stdout**, which Embr captures and exposes in the portal under each environment's **Logs** tab.
+
+**Format**: `<iso-timestamp> <LEVEL> <module> — <message>`
+
+```
+2026-04-17T15:27:42 INFO    backend.store — Using SQL store at sqlite:///deploy_test.db
+2026-04-17T15:27:42 INFO    backend.app — Flashcards AI starting — store=_DBStore cache=memory blob=_EmbrBlobStore ai=mock
+2026-04-17T15:27:42 INFO    backend.app — Created deck id=b5e4be19e0 title='New Deck'
+```
+
+**Levels**: set `LOG_LEVEL` to `DEBUG`, `INFO` (default), `WARNING`, or `ERROR`:
+
+```bash
+embr variables set --key LOG_LEVEL --value DEBUG
+```
+
+**What gets logged**:
+
+- **Startup summary** — which backend was picked for store / cache / blob / AI, so you can verify managed services connected.
+- **Backend selection** — each component logs the backend it chose at import (with credentials masked in URLs).
+- **Lifecycle events** — deck and card create/update/delete (`INFO`); reviews (`DEBUG` to avoid noise); AI generations and image uploads (`INFO`).
+- **Warnings** — rate-limit hits, rejected uploads, Redis connection failures, DB init failures (with full traceback).
+
+The `/api/health` endpoint also reports backend status (`ai_enabled`, `cache_enabled`, `embr_blob_enabled`) for quick at-a-glance checks via curl or uptime monitors.
+
 ## How to use this app
 
 1. **Browse the seeded decks** to learn the UI without typing a word.
@@ -169,11 +202,12 @@ flashcard-app/
 │   └── schema.sql          # Postgres schema — run by Embr on every deploy
 ├── backend/
 │   ├── app.py              # FastAPI routes
+│   ├── logging_config.py   # Structured logging setup (LOG_LEVEL env var)
 │   ├── models.py           # Pydantic schemas + in-memory record classes
 │   ├── store.py            # Decks/cards store (SQLAlchemy + in-memory fallback) + seed data
 │   ├── scheduler.py        # SM-2 review algorithm
 │   ├── cache.py            # Leaderboard + TTL cache + rate limiting (Redis + in-memory fallback)
-│   ├── blob.py             # Image upload handling
+│   ├── blob.py             # Image upload handling (Embr blob + local fallback)
 │   └── ai_service.py       # AI card generation
 └── static/
     ├── index.html          # Single-page frontend (vanilla JS)

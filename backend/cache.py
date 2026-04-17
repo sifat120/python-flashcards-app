@@ -34,21 +34,36 @@ logger = logging.getLogger(__name__)
 # ── Backend selection ────────────────────────────────────────────────────────
 
 def _connect_redis():
+    """Connect to Redis/Valkey if a URL is configured, else return None.
+
+    A failed connection is non-fatal: we log a warning and fall back to the
+    in-memory backend so the app keeps serving traffic.
+    """
     url = os.getenv("REDIS_URL") or os.getenv("CACHE_URL")
     if not url:
+        logger.info("No REDIS_URL/CACHE_URL set — using in-memory cache")
         return None
+    safe_url = url.split("@", 1)[-1] if "@" in url else url
     try:
         import redis  # type: ignore
         client = redis.from_url(url, decode_responses=True)
         client.ping()
-        logger.info("cache: connected to Redis at %s", url)
+        logger.info("Connected to Redis/Valkey at %s", safe_url)
         return client
-    except Exception as e:  # pragma: no cover - defensive
-        logger.warning("cache: Redis URL set but connection failed (%s); falling back to in-memory", e)
+    except Exception as e:  # pragma: no cover — defensive
+        logger.warning(
+            "Redis URL %s set but connection failed (%s); falling back to in-memory cache",
+            safe_url, e,
+        )
         return None
 
 
 _redis = _connect_redis()
+
+
+def is_redis_enabled() -> bool:
+    """True when the cache is backed by a real Redis/Valkey instance."""
+    return _redis is not None
 
 _LEADERBOARD_KEY = "leaderboard:streaks"
 

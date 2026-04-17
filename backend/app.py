@@ -1,17 +1,29 @@
-"""FastAPI application — REST API + static frontend for Flashcards AI."""
+"""FastAPI application — REST API + static frontend for Flashcards AI.
+
+Routes are grouped by concern (decks, cards, study, AI, images, leaderboard,
+static). Every handler is a small async function that delegates the real work
+to the storage / cache / blob / AI modules so this file stays scannable.
+"""
 
 from __future__ import annotations
 
+import logging
 from datetime import date
 from pathlib import Path
 
 from fastapi import FastAPI, File, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse
 
-from backend import cache
-from backend.ai_service import generate_cards, is_ai_enabled
-from backend.blob import UploadError, is_embr_blob_enabled, store as blob_store
-from backend.models import (
+# Configure logging before importing any module that might log at import time
+# (store.py, cache.py, blob.py all do backend selection on import).
+from backend.logging_config import setup_logging
+
+setup_logging()
+
+from backend import cache  # noqa: E402
+from backend.ai_service import generate_cards, is_ai_enabled  # noqa: E402
+from backend.blob import UploadError, is_embr_blob_enabled, store as blob_store  # noqa: E402
+from backend.models import (  # noqa: E402
     AIGenerateInput,
     AIGenerateResult,
     CardCreate,
@@ -25,13 +37,23 @@ from backend.models import (
     ReviewInput,
     StatsOut,
 )
-from backend.scheduler import VALID_RATINGS, apply_review
-from backend.store import store
+from backend.scheduler import VALID_RATINGS, apply_review  # noqa: E402
+from backend.store import store  # noqa: E402
+
+logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Flashcards AI", version="0.1.0")
 
 STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 SEED_DIR = STATIC_DIR / "seed-diagrams"
+
+logger.info(
+    "Flashcards AI starting — store=%s cache=%s blob=%s ai=%s",
+    type(store).__name__,
+    "redis" if cache.is_redis_enabled() else "memory",
+    type(blob_store).__name__,
+    "azure_openai" if is_ai_enabled() else "mock",
+)
 
 
 # ── Health ───────────────────────────────────────────────────────────────────
@@ -42,6 +64,7 @@ async def health():
         "status": "ok",
         "ai_enabled": is_ai_enabled(),
         "embr_blob_enabled": is_embr_blob_enabled(),
+        "cache_enabled": cache.is_redis_enabled(),
     }
 
 
@@ -66,7 +89,9 @@ async def list_decks():
 
 @app.post("/api/decks", response_model=DeckOut, status_code=201)
 async def create_deck(data: DeckCreate):
-    return _deck_to_out(store.create_deck(data))
+    deck = store.create_deck(data)
+    logger.info("Created deck id=%s title=%r", deck.id, deck.title)
+    return _deck_to_out(deck)
 
 
 @app.get("/api/decks/{deck_id}", response_model=DeckOut)
@@ -82,6 +107,7 @@ async def update_deck(deck_id: str, data: DeckUpdate):
     deck = store.update_deck(deck_id, data)
     if deck is None:
         raise HTTPException(404, "Deck not found")
+    logger.info("Updated deck id=%s", deck_id)
     return _deck_to_out(deck)
 
 
@@ -89,6 +115,7 @@ async def update_deck(deck_id: str, data: DeckUpdate):
 async def delete_deck(deck_id: str):
     if not store.delete_deck(deck_id):
         raise HTTPException(404, "Deck not found")
+    logger.info("Deleted deck id=%s", deck_id)
 
 
 # ── Cards ────────────────────────────────────────────────────────────────────
@@ -106,6 +133,7 @@ async def create_card(deck_id: str, data: CardCreate):
     if card is None:
         raise HTTPException(404, "Deck not found")
     cache.cache_delete(f"due:{deck_id}:{date.today().isoformat()}")
+    logger.info("Created card id=%s deck=%s", card.id, deck_id)
     return card.to_out()
 
 
@@ -121,6 +149,7 @@ async def update_card(card_id: str, data: CardUpdate):
 async def delete_card(card_id: str):
     if not store.delete_card(card_id):
         raise HTTPException(404, "Card not found")
+    logger.info("Deleted card id=%s", card_id)
 
 
 # ── Study flow ───────────────────────────────────────────────────────────────
@@ -142,10 +171,19 @@ async def review_card(card_id: str, data: ReviewInput):
         raise HTTPException(404, "Card not found")
     if data.rating not in VALID_RATINGS:
         raise HTTPException(400, f"rating must be one of {sorted(VALID_RATINGS)}")
+
     apply_review(card, data.rating)
     store.save_card(card)
-    cache.record_review(data.username.strip() or "anonymous", date.today().isoformat())
-    cache.cache_delete(f"due:{card.deck_id}:{date.today().isoformat()}")
+
+    username = data.username.strip() or "anonymous"
+    today_iso = date.today().isoformat()
+    new_streak = cache.record_review(username, today_iso)
+    cache.cache_delete(f"due:{card.deck_id}:{today_iso}")
+
+    logger.debug(
+        "Review applied card=%s rating=%s user=%s streak=%d next=%s",
+        card.id, data.rating, username, new_streak, card.next_review,
+    )
     return card.to_out()
 
 
@@ -159,6 +197,7 @@ async def ai_generate(deck_id: str, data: AIGenerateInput, request: Request):
     # Rate limit: 20 AI generations per hour per client IP.
     ip = request.client.host if request.client else "unknown"
     if not cache.rate_limit(f"ratelimit:ai:{ip}", max_requests=20, window_seconds=3600):
+        logger.warning("AI rate limit hit for ip=%s deck=%s", ip, deck_id)
         raise HTTPException(429, "AI generation rate limit exceeded (20/hour).")
 
     if not data.passage.strip():
@@ -170,6 +209,10 @@ async def ai_generate(deck_id: str, data: AIGenerateInput, request: Request):
             deck_id,
             CardCreate(front_text=c["front_text"], back_text=c["back_text"]),
         )
+    logger.info(
+        "AI generation deck=%s source=%s count=%d passage_chars=%d",
+        deck_id, source, len(cards), len(data.passage),
+    )
     return AIGenerateResult(cards=cards, source=source)
 
 
@@ -179,19 +222,28 @@ async def ai_generate(deck_id: str, data: AIGenerateInput, request: Request):
 async def upload_image(file: UploadFile = File(...), request: Request = None):
     ip = request.client.host if request and request.client else "unknown"
     if not cache.rate_limit(f"ratelimit:upload:{ip}", max_requests=30, window_seconds=3600):
+        logger.warning("Upload rate limit hit for ip=%s", ip)
         raise HTTPException(429, "Upload rate limit exceeded (30/hour).")
 
     data = await file.read()
     try:
         key, url = blob_store.save(file.filename or "upload.bin", data)
     except UploadError as e:
+        logger.warning("Image upload rejected: %s (filename=%s, bytes=%d)", e, file.filename, len(data))
         raise HTTPException(400, str(e))
+
+    logger.info("Image uploaded key=%s bytes=%d backend=%s", key, len(data), type(blob_store).__name__)
     return ImageUploadResult(key=key, url=url)
 
 
 @app.get("/uploads/{key}")
 async def serve_upload(key: str):
-    path = blob_store.path_for(key)
+    # Only the local backend serves uploads through the app. On Embr, blob
+    # URLs are /_embr/blob/{key} and served by the platform proxy directly.
+    path_for = getattr(blob_store, "path_for", None)
+    if path_for is None:
+        raise HTTPException(404, "Not found")
+    path = path_for(key)
     if not path.exists() or not path.is_file():
         raise HTTPException(404, "Not found")
     return FileResponse(path)

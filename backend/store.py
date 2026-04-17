@@ -14,6 +14,7 @@ called at startup as a safety net so local Postgres / sqlite work too.
 
 from __future__ import annotations
 
+import logging
 import os
 from datetime import date, datetime, timezone
 from threading import Lock
@@ -27,6 +28,8 @@ from backend.models import (
     DeckRecord,
     DeckUpdate,
 )
+
+logger = logging.getLogger(__name__)
 
 
 # ── Seed data — delete or edit once you have real decks ──────────────────────
@@ -147,6 +150,7 @@ class _MemoryStore:
         for card in cards:
             self._cards[card.id] = card
             self._cards_by_deck[card.deck_id].append(card.id)
+        logger.info("In-memory store seeded with %d decks, %d cards", len(decks), len(cards))
 
     # Decks
     def create_deck(self, data: DeckCreate) -> DeckRecord:
@@ -287,6 +291,10 @@ def _build_db_store():
     # SQLAlchemy expects "postgresql://"; Heroku/some platforms emit "postgres://".
     if db_url.startswith("postgres://"):
         db_url = "postgresql://" + db_url[len("postgres://") :]
+    # SQLAlchemy's default driver for `postgresql://` is psycopg2, but we ship
+    # psycopg3 in requirements.txt. Force the psycopg3 dialect explicitly.
+    if db_url.startswith("postgresql://"):
+        db_url = "postgresql+psycopg://" + db_url[len("postgresql://") :]
 
     engine = create_engine(db_url, pool_pre_ping=True, future=True)
     Base.metadata.create_all(engine)
@@ -321,6 +329,7 @@ def _build_db_store():
         def _maybe_seed(self) -> None:
             with Session.begin() as s:
                 if s.execute(select(_DeckRow.id).limit(1)).first() is not None:
+                    logger.info("DB store: existing data found, skipping seed")
                     return
                 decks, cards = _seed_records()
                 for d in decks:
@@ -338,6 +347,7 @@ def _build_db_store():
                         next_review=c.next_review,
                         last_reviewed=c.last_reviewed,
                     ))
+                logger.info("DB store seeded with %d decks, %d cards", len(decks), len(cards))
 
         # Decks
         def create_deck(self, data: DeckCreate) -> DeckRecord:
@@ -473,14 +483,29 @@ def _build_db_store():
 # ── Backend selection ────────────────────────────────────────────────────────
 
 def _make_store():
-    if not os.getenv("DATABASE_URL"):
+    """Pick the storage backend based on the environment.
+
+    On Embr `DATABASE_URL` is auto-injected when `database.enabled: true` in
+    `embr.yaml`, so the DB backend is the default in production. Locally, with
+    no `DATABASE_URL`, the in-memory backend kicks in so the app runs without
+    any setup. If DB init fails for any reason we log and fall back to memory
+    rather than crashing the app — this preserves uptime at the cost of
+    losing persistence for that boot.
+    """
+    db_url = os.getenv("DATABASE_URL")
+    if not db_url:
+        logger.info("No DATABASE_URL set — using in-memory store")
         return _MemoryStore()
+
+    # Mask credentials before logging the URL.
+    safe_url = db_url.split("@", 1)[-1] if "@" in db_url else db_url
     try:
-        return _build_db_store()
-    except Exception as e:  # pragma: no cover - defensive
-        import logging
-        logging.getLogger(__name__).warning(
-            "Falling back to in-memory store; DATABASE_URL set but DB init failed: %s", e
+        store = _build_db_store()
+        logger.info("Using SQL store at %s", safe_url)
+        return store
+    except Exception as e:  # pragma: no cover — defensive
+        logger.exception(
+            "DB init failed for %s — falling back to in-memory store: %s", safe_url, e
         )
         return _MemoryStore()
 
