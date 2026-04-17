@@ -2,7 +2,7 @@
 
 Given a card and a rating (again/hard/good/easy), update its ease factor,
 interval, and next-review date. A simplified variant of SuperMemo-2 suitable
-for template apps; swap for Anki's full algorithm if needed.
+for the app; swap for Anki's full algorithm if needed.
 """
 
 from __future__ import annotations

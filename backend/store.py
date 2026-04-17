@@ -1,17 +1,22 @@
-"""In-memory deck / card storage with pre-seeded example content.
+"""Deck / card storage.
 
-The seed content gives new users three working example decks so they
-can see the study flow, AI generation, and diagram support in action.
+Two interchangeable backends, picked at import time:
+  - DB backend  → used when `DATABASE_URL` is set (managed Postgres on Embr).
+  - Memory backend → used when no `DATABASE_URL` is present (local dev / tests).
 
-Drop-in replacement target: swap this module for a DB-backed version
-(e.g. SQLAlchemy + managed Postgres on Embr) without changing the API layer.
-When `database.enabled: true` is set in embr.yaml, `DATABASE_URL` will be
-injected as an environment variable — detect it here and switch backends.
+Both expose the same `store` singleton with identical methods so the API layer
+in `backend/app.py` is backend-agnostic.
+
+The schema in `db/schema.sql` is what Embr runs on deploy
+(`psql $DATABASE_URL -f db/schema.sql`). SQLAlchemy's `create_all()` is also
+called at startup as a safety net so local Postgres / sqlite work too.
 """
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+import os
+from datetime import date, datetime, timezone
+from threading import Lock
 from typing import Optional
 
 from backend.models import (
@@ -101,102 +106,126 @@ _SEED_DECKS = [
 ]
 
 
-# ── Store ────────────────────────────────────────────────────────────────────
+def _seed_records() -> tuple[list[DeckRecord], list[CardRecord]]:
+    """Build DeckRecord / CardRecord instances from the seed data."""
+    decks: list[DeckRecord] = []
+    cards: list[CardRecord] = []
+    for deck_data in _SEED_DECKS:
+        deck = DeckRecord(
+            title=deck_data["title"],
+            description=deck_data["description"],
+            subject=deck_data["subject"],
+        )
+        decks.append(deck)
+        for c in deck_data["cards"]:
+            cards.append(
+                CardRecord(
+                    deck_id=deck.id,
+                    front_text=c["front"],
+                    back_text=c["back"],
+                    image_url=c.get("image"),
+                )
+            )
+    return decks, cards
 
-class Store:
+
+# ── In-memory backend ────────────────────────────────────────────────────────
+
+class _MemoryStore:
     def __init__(self) -> None:
+        self._lock = Lock()
         self._decks: dict[str, DeckRecord] = {}
         self._cards: dict[str, CardRecord] = {}
         self._cards_by_deck: dict[str, list[str]] = {}
         self._seed()
 
     def _seed(self) -> None:
-        for deck_data in _SEED_DECKS:
-            deck = DeckRecord(
-                title=deck_data["title"],
-                description=deck_data["description"],
-                subject=deck_data["subject"],
-            )
+        decks, cards = _seed_records()
+        for deck in decks:
             self._decks[deck.id] = deck
             self._cards_by_deck[deck.id] = []
-            for c in deck_data["cards"]:
-                card = CardRecord(
-                    deck_id=deck.id,
-                    front_text=c["front"],
-                    back_text=c["back"],
-                    image_url=c.get("image"),
-                )
-                self._cards[card.id] = card
-                self._cards_by_deck[deck.id].append(card.id)
+        for card in cards:
+            self._cards[card.id] = card
+            self._cards_by_deck[card.deck_id].append(card.id)
 
-    # ── Decks ────────────────────────────────────────────────────────────
-
+    # Decks
     def create_deck(self, data: DeckCreate) -> DeckRecord:
         deck = DeckRecord(data.title, data.description, data.subject)
-        self._decks[deck.id] = deck
-        self._cards_by_deck[deck.id] = []
+        with self._lock:
+            self._decks[deck.id] = deck
+            self._cards_by_deck[deck.id] = []
         return deck
 
     def list_decks(self) -> list[DeckRecord]:
-        return sorted(self._decks.values(), key=lambda d: d.created_at)
+        with self._lock:
+            return sorted(self._decks.values(), key=lambda d: d.created_at)
 
     def get_deck(self, deck_id: str) -> Optional[DeckRecord]:
         return self._decks.get(deck_id)
 
     def update_deck(self, deck_id: str, data: DeckUpdate) -> Optional[DeckRecord]:
-        deck = self._decks.get(deck_id)
-        if deck is None:
-            return None
-        if data.title is not None:
-            deck.title = data.title
-        if data.description is not None:
-            deck.description = data.description
-        if data.subject is not None:
-            deck.subject = data.subject
-        return deck
+        with self._lock:
+            deck = self._decks.get(deck_id)
+            if deck is None:
+                return None
+            if data.title is not None:
+                deck.title = data.title
+            if data.description is not None:
+                deck.description = data.description
+            if data.subject is not None:
+                deck.subject = data.subject
+            return deck
 
     def delete_deck(self, deck_id: str) -> bool:
-        if deck_id not in self._decks:
-            return False
-        for cid in self._cards_by_deck.pop(deck_id, []):
-            self._cards.pop(cid, None)
-        self._decks.pop(deck_id)
-        return True
+        with self._lock:
+            if deck_id not in self._decks:
+                return False
+            for cid in self._cards_by_deck.pop(deck_id, []):
+                self._cards.pop(cid, None)
+            self._decks.pop(deck_id)
+            return True
 
-    # ── Cards ────────────────────────────────────────────────────────────
-
+    # Cards
     def create_card(self, deck_id: str, data: CardCreate) -> Optional[CardRecord]:
-        if deck_id not in self._decks:
-            return None
-        card = CardRecord(deck_id, data.front_text, data.back_text, data.image_url)
-        self._cards[card.id] = card
-        self._cards_by_deck[deck_id].append(card.id)
-        return card
+        with self._lock:
+            if deck_id not in self._decks:
+                return None
+            card = CardRecord(deck_id, data.front_text, data.back_text, data.image_url)
+            self._cards[card.id] = card
+            self._cards_by_deck[deck_id].append(card.id)
+            return card
 
     def list_cards(self, deck_id: str) -> list[CardRecord]:
-        return [self._cards[cid] for cid in self._cards_by_deck.get(deck_id, [])]
+        with self._lock:
+            return [self._cards[cid] for cid in self._cards_by_deck.get(deck_id, [])]
 
     def get_card(self, card_id: str) -> Optional[CardRecord]:
         return self._cards.get(card_id)
 
     def update_card(self, card_id: str, data: CardUpdate) -> Optional[CardRecord]:
-        card = self._cards.get(card_id)
-        if card is None:
-            return None
-        if data.front_text is not None:
-            card.front_text = data.front_text
-        if data.back_text is not None:
-            card.back_text = data.back_text
-        if data.image_url is not None:
-            card.image_url = data.image_url or None
-        return card
+        with self._lock:
+            card = self._cards.get(card_id)
+            if card is None:
+                return None
+            if data.front_text is not None:
+                card.front_text = data.front_text
+            if data.back_text is not None:
+                card.back_text = data.back_text
+            if data.image_url is not None:
+                card.image_url = data.image_url or None
+            return card
 
     def delete_card(self, card_id: str) -> bool:
-        card = self._cards.pop(card_id, None)
-        if card is None:
-            return False
-        self._cards_by_deck[card.deck_id].remove(card_id)
-        return True
+        with self._lock:
+            card = self._cards.pop(card_id, None)
+            if card is None:
+                return False
+            self._cards_by_deck[card.deck_id].remove(card_id)
+            return True
+
+    def save_card(self, card: CardRecord) -> None:
+        # Mutations on the record are already by reference — nothing to flush.
+        pass
 
     def next_due_card(self, deck_id: str) -> Optional[CardRecord]:
         due = [c for c in self.list_cards(deck_id) if c.is_due()]
@@ -209,5 +238,251 @@ class Store:
         return sum(1 for c in self.list_cards(deck_id) if c.is_due())
 
 
-# Singleton used by the API
-store = Store()
+# ── Postgres backend (SQLAlchemy) ────────────────────────────────────────────
+
+def _build_db_store():
+    """Construct a DB-backed store. Imported lazily to avoid SQLAlchemy
+    being a hard dependency for in-memory mode."""
+    from sqlalchemy import (
+        Column,
+        Date,
+        DateTime,
+        Float,
+        ForeignKey,
+        Integer,
+        String,
+        create_engine,
+        select,
+    )
+    from sqlalchemy.orm import declarative_base, sessionmaker
+
+    Base = declarative_base()
+
+    class _DeckRow(Base):
+        __tablename__ = "decks"
+        id = Column(String, primary_key=True)
+        title = Column(String, nullable=False)
+        description = Column(String, nullable=False, default="")
+        subject = Column(String, nullable=False, default="")
+        created_at = Column(String, nullable=False)
+
+    class _CardRow(Base):
+        __tablename__ = "cards"
+        id = Column(String, primary_key=True)
+        deck_id = Column(
+            String,
+            ForeignKey("decks.id", ondelete="CASCADE"),
+            nullable=False,
+            index=True,
+        )
+        front_text = Column(String, nullable=False)
+        back_text = Column(String, nullable=False)
+        image_url = Column(String, nullable=True)
+        ease = Column(Float, nullable=False, default=2.5)
+        interval_days = Column(Integer, nullable=False, default=0)
+        next_review = Column(Date, nullable=False)
+        last_reviewed = Column(DateTime(timezone=True), nullable=True)
+
+    db_url = os.environ["DATABASE_URL"]
+    # SQLAlchemy expects "postgresql://"; Heroku/some platforms emit "postgres://".
+    if db_url.startswith("postgres://"):
+        db_url = "postgresql://" + db_url[len("postgres://") :]
+
+    engine = create_engine(db_url, pool_pre_ping=True, future=True)
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine, expire_on_commit=False, future=True)
+
+    def _to_deck(row: _DeckRow) -> DeckRecord:
+        d = DeckRecord.__new__(DeckRecord)
+        d.id = row.id
+        d.title = row.title
+        d.description = row.description or ""
+        d.subject = row.subject or ""
+        d.created_at = row.created_at
+        return d
+
+    def _to_card(row: _CardRow) -> CardRecord:
+        c = CardRecord.__new__(CardRecord)
+        c.id = row.id
+        c.deck_id = row.deck_id
+        c.front_text = row.front_text
+        c.back_text = row.back_text
+        c.image_url = row.image_url
+        c.ease = float(row.ease)
+        c.interval_days = int(row.interval_days)
+        c.next_review = row.next_review
+        c.last_reviewed = row.last_reviewed
+        return c
+
+    class _DBStore:
+        def __init__(self) -> None:
+            self._maybe_seed()
+
+        def _maybe_seed(self) -> None:
+            with Session.begin() as s:
+                if s.execute(select(_DeckRow.id).limit(1)).first() is not None:
+                    return
+                decks, cards = _seed_records()
+                for d in decks:
+                    s.add(_DeckRow(
+                        id=d.id, title=d.title,
+                        description=d.description, subject=d.subject,
+                        created_at=d.created_at,
+                    ))
+                for c in cards:
+                    s.add(_CardRow(
+                        id=c.id, deck_id=c.deck_id,
+                        front_text=c.front_text, back_text=c.back_text,
+                        image_url=c.image_url,
+                        ease=c.ease, interval_days=c.interval_days,
+                        next_review=c.next_review,
+                        last_reviewed=c.last_reviewed,
+                    ))
+
+        # Decks
+        def create_deck(self, data: DeckCreate) -> DeckRecord:
+            deck = DeckRecord(data.title, data.description, data.subject)
+            with Session.begin() as s:
+                s.add(_DeckRow(
+                    id=deck.id, title=deck.title,
+                    description=deck.description, subject=deck.subject,
+                    created_at=deck.created_at,
+                ))
+            return deck
+
+        def list_decks(self) -> list[DeckRecord]:
+            with Session() as s:
+                rows = s.execute(
+                    select(_DeckRow).order_by(_DeckRow.created_at)
+                ).scalars().all()
+                return [_to_deck(r) for r in rows]
+
+        def get_deck(self, deck_id: str) -> Optional[DeckRecord]:
+            with Session() as s:
+                row = s.get(_DeckRow, deck_id)
+                return _to_deck(row) if row else None
+
+        def update_deck(self, deck_id: str, data: DeckUpdate) -> Optional[DeckRecord]:
+            with Session.begin() as s:
+                row = s.get(_DeckRow, deck_id)
+                if row is None:
+                    return None
+                if data.title is not None:
+                    row.title = data.title
+                if data.description is not None:
+                    row.description = data.description
+                if data.subject is not None:
+                    row.subject = data.subject
+                s.flush()
+                return _to_deck(row)
+
+        def delete_deck(self, deck_id: str) -> bool:
+            with Session.begin() as s:
+                row = s.get(_DeckRow, deck_id)
+                if row is None:
+                    return False
+                s.delete(row)
+                return True
+
+        # Cards
+        def create_card(self, deck_id: str, data: CardCreate) -> Optional[CardRecord]:
+            with Session.begin() as s:
+                if s.get(_DeckRow, deck_id) is None:
+                    return None
+                card = CardRecord(deck_id, data.front_text, data.back_text, data.image_url)
+                s.add(_CardRow(
+                    id=card.id, deck_id=card.deck_id,
+                    front_text=card.front_text, back_text=card.back_text,
+                    image_url=card.image_url,
+                    ease=card.ease, interval_days=card.interval_days,
+                    next_review=card.next_review,
+                    last_reviewed=card.last_reviewed,
+                ))
+                return card
+
+        def list_cards(self, deck_id: str) -> list[CardRecord]:
+            with Session() as s:
+                rows = s.execute(
+                    select(_CardRow).where(_CardRow.deck_id == deck_id)
+                ).scalars().all()
+                return [_to_card(r) for r in rows]
+
+        def get_card(self, card_id: str) -> Optional[CardRecord]:
+            with Session() as s:
+                row = s.get(_CardRow, card_id)
+                return _to_card(row) if row else None
+
+        def update_card(self, card_id: str, data: CardUpdate) -> Optional[CardRecord]:
+            with Session.begin() as s:
+                row = s.get(_CardRow, card_id)
+                if row is None:
+                    return None
+                if data.front_text is not None:
+                    row.front_text = data.front_text
+                if data.back_text is not None:
+                    row.back_text = data.back_text
+                if data.image_url is not None:
+                    row.image_url = data.image_url or None
+                s.flush()
+                return _to_card(row)
+
+        def delete_card(self, card_id: str) -> bool:
+            with Session.begin() as s:
+                row = s.get(_CardRow, card_id)
+                if row is None:
+                    return False
+                s.delete(row)
+                return True
+
+        def save_card(self, card: CardRecord) -> None:
+            """Persist mutations made to a CardRecord (e.g. by the SM-2 scheduler)."""
+            with Session.begin() as s:
+                row = s.get(_CardRow, card.id)
+                if row is None:
+                    return
+                row.ease = card.ease
+                row.interval_days = card.interval_days
+                row.next_review = card.next_review
+                row.last_reviewed = card.last_reviewed
+
+        def next_due_card(self, deck_id: str) -> Optional[CardRecord]:
+            today = date.today()
+            with Session() as s:
+                row = s.execute(
+                    select(_CardRow)
+                    .where(_CardRow.deck_id == deck_id, _CardRow.next_review <= today)
+                    .order_by(_CardRow.next_review)
+                    .limit(1)
+                ).scalar_one_or_none()
+                return _to_card(row) if row else None
+
+        def due_count(self, deck_id: str) -> int:
+            today = date.today()
+            with Session() as s:
+                rows = s.execute(
+                    select(_CardRow.id).where(
+                        _CardRow.deck_id == deck_id,
+                        _CardRow.next_review <= today,
+                    )
+                ).all()
+                return len(rows)
+
+    return _DBStore()
+
+
+# ── Backend selection ────────────────────────────────────────────────────────
+
+def _make_store():
+    if not os.getenv("DATABASE_URL"):
+        return _MemoryStore()
+    try:
+        return _build_db_store()
+    except Exception as e:  # pragma: no cover - defensive
+        import logging
+        logging.getLogger(__name__).warning(
+            "Falling back to in-memory store; DATABASE_URL set but DB init failed: %s", e
+        )
+        return _MemoryStore()
+
+
+store = _make_store()

@@ -91,7 +91,8 @@ class StatsOut(BaseModel):
     cards_due_today: int
 
 
-# ── In-memory records (swap for ORM models when using Postgres) ──────────────
+# ── In-memory record classes (used in both in-memory and DB-backed modes;
+#    backend/store.py builds these from query rows when DATABASE_URL is set) ──
 
 class DeckRecord:
     def __init__(self, title: str, description: str = "", subject: str = ""):

@@ -1,7 +1,7 @@
 """Blob storage abstraction — local filesystem by default, Azure Blob on Embr.
 
-Default (template): uploads are written to `backend/uploads/` and served by
-the app at `/uploads/{key}`. This lets the template run out-of-the-box with
+Default: uploads are written to `backend/uploads/` and served by
+the app at `/uploads/{key}`. This lets the app run out-of-the-box with
 zero configuration.
 
 Production (Embr): when `EMBR_BLOB_KEY` is set, Embr has provisioned a
@@ -69,8 +69,10 @@ class _LocalStore:
 #         client.upload_blob(data, content_settings=ContentSettings(content_type=f"image/{ext}"))
 #         return key, client.url
 #
-# On Embr: EMBR_BLOB_KEY + EMBR_BLOB_URL are injected; use those to talk to
-# the proxy's `_embr/blob/` data-plane endpoint.
+# On Embr: EMBR_BLOB_KEY is injected automatically. Upload via:
+#   PUT https://<env-domain>/_embr/blob/{key}
+#   Authorization: Bearer ${EMBR_BLOB_KEY}
+# Reads are public at the same URL — no auth required.
 
 
 def is_embr_blob_enabled() -> bool:

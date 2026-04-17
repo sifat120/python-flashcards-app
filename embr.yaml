@@ -1,0 +1,42 @@
+version: 1
+platform: python
+platformVersion: "3.14"
+
+run:
+  port: 8080
+
+# Managed Postgres — Embr provisions a database, runs db/schema.sql on every
+# deploy, and injects DATABASE_URL at runtime. backend/store.py uses it
+# automatically when DATABASE_URL is present.
+database:
+  enabled: true
+
+# Managed Valkey (Redis-compatible) cache — Embr starts a sidecar Valkey and
+# injects REDIS_URL + CACHE_URL. backend/cache.py uses it automatically when
+# REDIS_URL is present.
+cache:
+  enabled: true
+
+healthCheck:
+  path: /api/health
+  expectedStatusCode: 200
+
+# ---------------------------------------------------------------------------
+# Blob storage is auto-provisioned per environment — no embr.yaml block
+# needed. EMBR_BLOB_KEY is injected automatically and writes go to
+# https://<env-domain>/_embr/blob/{key}. See backend/blob.py for the
+# upload helper.
+#
+# AI (Azure OpenAI) — secrets, not config. Set them with the Embr CLI:
+#
+#   embr variables set --key AZURE_OPENAI_ENDPOINT   --value https://<resource>.openai.azure.com/
+#   embr variables set --key AZURE_OPENAI_API_KEY    --value <key> --secret
+#   embr variables set --key AZURE_OPENAI_DEPLOYMENT --value <deployment-name>
+#
+# Then uncomment `openai>=1.12` in `requirements.txt` and the real-implementation
+# block in `backend/ai_service.py`. Until then the app uses a mock generator.
+#
+# Horizontal scaling is configured per-environment, not in this file:
+#
+#   embr environments scale 3
+# ---------------------------------------------------------------------------

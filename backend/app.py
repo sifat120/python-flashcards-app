@@ -143,6 +143,7 @@ async def review_card(card_id: str, data: ReviewInput):
     if data.rating not in VALID_RATINGS:
         raise HTTPException(400, f"rating must be one of {sorted(VALID_RATINGS)}")
     apply_review(card, data.rating)
+    store.save_card(card)
     cache.record_review(data.username.strip() or "anonymous", date.today().isoformat())
     cache.cache_delete(f"due:{card.deck_id}:{date.today().isoformat()}")
     return card.to_out()
@@ -198,7 +199,7 @@ async def serve_upload(key: str):
 
 @app.get("/seed-diagrams/{name}")
 async def serve_seed_diagram(name: str):
-    # Seed diagrams shipped with the template — show customers what's possible.
+    # Seed diagrams shipped with the app — show customers what's possible.
     # Replace with your own content or let users upload via /api/images.
     if ".." in name or "/" in name or "\\" in name:
         raise HTTPException(400, "invalid name")

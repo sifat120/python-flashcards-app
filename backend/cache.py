@@ -1,53 +1,95 @@
-"""In-memory cache & leaderboard — swap for managed Redis/Valkey on Embr.
+"""Cache, leaderboard, and rate limiting.
 
-Implements the patterns from 05-flashcards-ai.md using plain Python dicts:
+Two interchangeable backends, picked at import time:
+  - Redis backend → used when `REDIS_URL` (or `CACHE_URL`) is set
+                    (managed Valkey on Embr).
+  - Memory backend → used when no Redis URL is present (local dev / tests).
+
+Implements the same module-level functions in both modes so callers in
+`backend/app.py` don't care which backend is active:
 
   - Leaderboard (sorted set)      — `leaderboard:streaks`
-  - Due-today cache (TTL key)     — `due:{deck_id}:{date}`
-  - Rate limit counter            — `ratelimit:ai:{token}`
-  - Study session state           — `session:{token}`
+  - Per-user totals               — `total:{username}`
+  - Last review day per user      — `last_review:{username}`
+  - TTL cache                     — `cache:{key}`
+  - Rate limit counters           — caller-supplied key (e.g. `ratelimit:ai:{ip}`)
 
-To enable the real thing:
-  1. Add `cache.enabled: true` to embr.yaml (or just import `redis` — Embr
-     auto-detects the dependency and provisions a sidecar Valkey).
-  2. Uncomment `redis>=5.0` in requirements.txt.
-  3. Replace the dict-based implementations below with the Redis calls
-     shown in the comments (ZADD, ZREVRANGE, INCR, EXPIRE, etc.).
-
-Embr injects REDIS_URL and CACHE_URL into the environment automatically.
+Embr injects `REDIS_URL` and `CACHE_URL` automatically when
+`cache.enabled: true` is set in `embr.yaml`.
 """
 
 from __future__ import annotations
 
+import logging
 import os
 import time
 from collections import defaultdict
+from datetime import date
 from threading import Lock
 from typing import Optional
 
-# Uncomment when enabling real Redis:
-# import redis
-# _redis = redis.from_url(os.getenv("REDIS_URL", "redis://127.0.0.1:6379"), decode_responses=True)
+logger = logging.getLogger(__name__)
 
 
-# ── Leaderboard (sorted set equivalent) ──────────────────────────────────────
+# ── Backend selection ────────────────────────────────────────────────────────
+
+def _connect_redis():
+    url = os.getenv("REDIS_URL") or os.getenv("CACHE_URL")
+    if not url:
+        return None
+    try:
+        import redis  # type: ignore
+        client = redis.from_url(url, decode_responses=True)
+        client.ping()
+        logger.info("cache: connected to Redis at %s", url)
+        return client
+    except Exception as e:  # pragma: no cover - defensive
+        logger.warning("cache: Redis URL set but connection failed (%s); falling back to in-memory", e)
+        return None
+
+
+_redis = _connect_redis()
+
+_LEADERBOARD_KEY = "leaderboard:streaks"
+
+
+# ── In-memory state (used when _redis is None) ───────────────────────────────
 
 _lock = Lock()
-_streaks: dict[str, int] = {}           # username -> streak
-_last_review_day: dict[str, str] = {}   # username -> ISO date of most recent review
+_streaks: dict[str, int] = {}
+_last_review_day: dict[str, str] = {}
 _total_reviews: dict[str, int] = defaultdict(int)
+_ttl_store: dict[str, tuple[float, object]] = {}
+_rate_counters: dict[str, tuple[float, int]] = {}
 
+
+# ── Leaderboard ──────────────────────────────────────────────────────────────
 
 def record_review(username: str, review_day_iso: str) -> int:
-    """Update streak + total count for a user and return new streak.
+    """Update streak + total review count for a user; return new streak.
 
     Streak rules:
-      - Reviewing today when last review was today → streak unchanged
-      - Reviewing today when last review was yesterday → streak + 1
-      - Any longer gap → streak resets to 1
+      - Same day as last review            → unchanged
+      - Day after last review              → +1
+      - Any longer gap (or no prior)       → reset to 1
     """
-    # Redis: ZADD leaderboard:streaks {new_streak} {username}
-    #        INCR total:{username}
+    if _redis is not None:
+        prev_day_key = f"last_review:{username}"
+        total_key = f"total:{username}"
+        prev_day = _redis.get(prev_day_key)
+        if prev_day == review_day_iso:
+            new_streak = int(_redis.zscore(_LEADERBOARD_KEY, username) or 1)
+        elif prev_day and _day_delta(prev_day, review_day_iso) == 1:
+            new_streak = int(_redis.zscore(_LEADERBOARD_KEY, username) or 0) + 1
+        else:
+            new_streak = 1
+        pipe = _redis.pipeline()
+        pipe.zadd(_LEADERBOARD_KEY, {username: new_streak})
+        pipe.set(prev_day_key, review_day_iso)
+        pipe.incr(total_key)
+        pipe.execute()
+        return new_streak
+
     with _lock:
         _total_reviews[username] += 1
         last = _last_review_day.get(username)
@@ -63,35 +105,41 @@ def record_review(username: str, review_day_iso: str) -> int:
 
 
 def leaderboard(top_n: int = 10) -> list[tuple[str, int]]:
-    """Return top-N (username, streak) pairs, descending."""
-    # Redis: ZREVRANGE leaderboard:streaks 0 {top_n-1} WITHSCORES
+    """Return top-N (username, streak) pairs, descending by streak."""
+    if _redis is not None:
+        rows = _redis.zrevrange(_LEADERBOARD_KEY, 0, top_n - 1, withscores=True)
+        return [(name, int(score)) for name, score in rows]
+
     with _lock:
         pairs = sorted(_streaks.items(), key=lambda kv: kv[1], reverse=True)
         return pairs[:top_n]
 
 
 def get_streak(username: str) -> int:
+    if _redis is not None:
+        score = _redis.zscore(_LEADERBOARD_KEY, username)
+        return int(score) if score is not None else 0
     return _streaks.get(username, 0)
 
 
 def get_total_reviews(username: str) -> int:
+    if _redis is not None:
+        v = _redis.get(f"total:{username}")
+        return int(v) if v is not None else 0
     return _total_reviews.get(username, 0)
 
 
 def _day_delta(earlier_iso: str, later_iso: str) -> int:
-    from datetime import date
     a = date.fromisoformat(earlier_iso)
     b = date.fromisoformat(later_iso)
     return (b - a).days
 
 
-# ── TTL cache (for due-today lists, event detail, etc.) ──────────────────────
+# ── TTL cache (string values) ────────────────────────────────────────────────
 
-_ttl_store: dict[str, tuple[float, object]] = {}
-
-
-def cache_get(key: str) -> Optional[object]:
-    # Redis: GET {key}
+def cache_get(key: str) -> Optional[str]:
+    if _redis is not None:
+        return _redis.get(f"cache:{key}")
     entry = _ttl_store.get(key)
     if entry is None:
         return None
@@ -99,31 +147,37 @@ def cache_get(key: str) -> Optional[object]:
     if time.time() > expires_at:
         _ttl_store.pop(key, None)
         return None
-    return value
+    return value  # type: ignore[return-value]
 
 
-def cache_set(key: str, value: object, ttl_seconds: int) -> None:
-    # Redis: SETEX {key} {ttl_seconds} {value}
+def cache_set(key: str, value: str, ttl_seconds: int) -> None:
+    if _redis is not None:
+        _redis.setex(f"cache:{key}", ttl_seconds, value)
+        return
     _ttl_store[key] = (time.time() + ttl_seconds, value)
 
 
 def cache_delete(key: str) -> None:
+    if _redis is not None:
+        _redis.delete(f"cache:{key}")
+        return
     _ttl_store.pop(key, None)
 
 
 # ── Rate limiting ────────────────────────────────────────────────────────────
 
-_rate_counters: dict[str, tuple[float, int]] = {}  # key -> (window_expires_at, count)
-
-
 def rate_limit(key: str, max_requests: int, window_seconds: int) -> bool:
-    """Return True if the request is allowed, False if rate-limited.
+    """Return True if the request is allowed, False if rate-limited."""
+    if _redis is not None:
+        # Atomic: INCR then EXPIRE on first hit. Pipeline isn't strictly atomic
+        # but the EXPIRE is idempotent so the worst case is the window resets
+        # one extra second after a race — acceptable for rate limiting.
+        pipe = _redis.pipeline()
+        pipe.incr(key)
+        pipe.expire(key, window_seconds, nx=True)
+        count, _ = pipe.execute()
+        return int(count) <= max_requests
 
-    Redis equivalent (atomic):
-      local c = redis.call('INCR', KEYS[1])
-      if c == 1 then redis.call('EXPIRE', KEYS[1], ARGV[1]) end
-      return c <= tonumber(ARGV[2])
-    """
     now = time.time()
     expires_at, count = _rate_counters.get(key, (0, 0))
     if now > expires_at:
