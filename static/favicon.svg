@@ -1,0 +1,6 @@
+<svg viewBox="0 0 32 32" xmlns="http://www.w3.org/2000/svg">
+  <rect width="32" height="32" rx="6" fill="#1565c0"/>
+  <rect x="7" y="8" width="18" height="16" rx="2" fill="#ffffff"/>
+  <line x1="7" y1="13" x2="25" y2="13" stroke="#1565c0" stroke-width="1.5"/>
+  <text x="16" y="22" text-anchor="middle" font-family="serif" font-size="10" font-weight="bold" fill="#1565c0">Q</text>
+</svg>

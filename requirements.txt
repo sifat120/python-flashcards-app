@@ -1,0 +1,13 @@
+fastapi>=0.110,<1
+gunicorn>=21,<24
+a2wsgi>=1.7,<2
+python-multipart>=0.0.9,<1
+# Uncomment for AI integration:
+# openai>=1.12
+# Uncomment for managed Postgres (backend/store.py):
+# sqlalchemy>=2.0
+# psycopg[binary]>=3.1
+# Uncomment for managed Redis / Valkey cache (backend/cache.py):
+# redis>=5.0
+# Uncomment for Azure Blob Storage (backend/blob.py):
+# azure-storage-blob>=12.19

@@ -1,0 +1,425 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Flashcards AI</title>
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<style>
+  body { font-family: serif; margin: 20px; max-width: 1000px; }
+  header { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #ccc; padding-bottom: 10px; }
+  header h1 { margin: 0; }
+  .me { font-size: .9rem; }
+  .me input { font-family: serif; font-size: .9rem; width: 120px; }
+  .badge { font-size: .7rem; padding: 2px 6px; border: 1px solid #aaa; border-radius: 3px; margin-left: 4px; }
+  .badge.on { color: green; border-color: green; }
+  .badge.off { color: gray; }
+
+  main { display: grid; grid-template-columns: 2fr 1fr; gap: 20px; margin-top: 15px; }
+  @media (max-width: 700px) { main { grid-template-columns: 1fr; } }
+
+  .panel { border: 1px solid #ccc; padding: 12px; margin-bottom: 15px; }
+  .panel h2, .panel h3 { margin-top: 0; }
+
+  input, textarea, select, button { font-family: serif; font-size: 1rem; }
+  input[type=text], textarea { width: 100%; box-sizing: border-box; margin-bottom: 6px; }
+  textarea { min-height: 60px; }
+  .btn { cursor: pointer; margin-right: 4px; padding: 4px 10px; }
+  .btn.primary { background: #1565c0; color: #fff; border: 1px solid #0d47a1; }
+  .btn.danger { color: #b71c1c; }
+  .row { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+
+  .deck-card { border: 1px solid #ccc; padding: 10px; margin-bottom: 8px; cursor: pointer; }
+  .deck-card:hover { background: #f5f5f5; }
+  .deck-card h3 { margin: 0 0 4px 0; }
+  .deck-card .meta { font-size: .85rem; color: #555; }
+  .due { color: #b71c1c; font-weight: bold; }
+
+  .card-item { border: 1px solid #ddd; padding: 8px; margin-bottom: 6px; display: flex; gap: 8px; }
+  .card-item .thumb { width: 60px; height: 45px; object-fit: contain; background: #f0f0f0; border: 1px solid #ddd; flex-shrink: 0; }
+  .card-item .text { flex: 1; font-size: .9rem; }
+  .card-item .ctrls { display: flex; flex-direction: column; gap: 2px; }
+
+  .study-card { border: 2px solid #1565c0; padding: 20px; text-align: center; min-height: 180px; display: flex; flex-direction: column; justify-content: center; }
+  .study-card img { max-width: 100%; max-height: 220px; margin: 8px auto; display: block; }
+  .study-card pre { white-space: pre-wrap; font-family: serif; text-align: left; }
+  .rating-row { display: flex; justify-content: center; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
+  .rating-row .btn { min-width: 75px; }
+  .rating-again { background: #d32f2f; color: #fff; border-color: #b71c1c; }
+  .rating-hard  { background: #f57c00; color: #fff; border-color: #e65100; }
+  .rating-good  { background: #388e3c; color: #fff; border-color: #1b5e20; }
+  .rating-easy  { background: #1976d2; color: #fff; border-color: #0d47a1; }
+
+  .leaderboard { font-size: .9rem; }
+  .leaderboard table { width: 100%; border-collapse: collapse; }
+  .leaderboard td { padding: 3px 4px; }
+  .leaderboard tr.me { background: #fff9c4; }
+
+  .seed-gallery { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; }
+  .seed-gallery img { width: 70px; height: 50px; object-fit: contain; border: 1px solid #ccc; cursor: pointer; background: #fff; }
+  .seed-gallery img.selected { border: 2px solid #1565c0; }
+  .hint { font-size: .8rem; color: #666; }
+  .error { color: #b71c1c; font-size: .85rem; margin-top: 4px; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Flashcards AI
+    <span id="ai-badge" class="badge off">AI Mock</span>
+    <span id="blob-badge" class="badge off">Local uploads</span>
+  </h1>
+  <div class="me">Studying as:
+    <input id="me-input" value="" placeholder="your name" />
+    <span id="me-streak"></span>
+  </div>
+</header>
+
+<main>
+  <section id="main-col">
+    <div id="decks-view"></div>
+    <div id="deck-view" style="display:none"></div>
+    <div id="study-view" style="display:none"></div>
+  </section>
+
+  <aside>
+    <div class="panel leaderboard">
+      <h3>🔥 Top Streaks</h3>
+      <table id="leaderboard-tbl"><tbody></tbody></table>
+      <div class="hint" id="no-reviews" style="display:none">Review a card to appear here.</div>
+    </div>
+    <div class="panel">
+      <h3>How this template works</h3>
+      <ol style="padding-left: 18px; font-size: .88rem;">
+        <li>Pre-seeded decks show the study flow. Delete them any time.</li>
+        <li>Add cards manually, or paste study notes and click <b>AI Generate</b>.</li>
+        <li>Attach images: pick a <b>seed diagram</b> or upload your own.</li>
+        <li>Streaks track consecutive days of review — powered by the cache layer.</li>
+      </ol>
+      <div class="hint">
+        Swap the in-memory <code>store.py</code> / <code>cache.py</code> / <code>blob.py</code>
+        for managed Postgres, Valkey, and Azure Blob on Embr — see each file's docstring.
+      </div>
+    </div>
+  </aside>
+</main>
+
+<script>
+const API = '/api';
+const SEED_DIAGRAMS = [
+  '/seed-diagrams/cell-structure.svg',
+  '/seed-diagrams/water-cycle.svg',
+  '/seed-diagrams/binary-tree.svg',
+  '/seed-diagrams/linked-list.svg',
+  '/seed-diagrams/atom.svg',
+];
+
+const el = id => document.getElementById(id);
+const esc = s => { const d = document.createElement('div'); d.textContent = s ?? ''; return d.innerHTML; };
+
+let currentDeckId = null;
+let studyState = null;
+
+// ── Username handling (client-side — swap for real auth in production) ──
+function username() { return (el('me-input').value || '').trim() || 'anonymous'; }
+el('me-input').value = localStorage.getItem('flashcards_user') || '';
+el('me-input').addEventListener('change', () => {
+  localStorage.setItem('flashcards_user', username());
+  refreshLeaderboard(); refreshStats();
+});
+
+// ── Health / feature flags ──
+fetch(`${API}/health`).then(r => r.json()).then(d => {
+  if (d.ai_enabled) { el('ai-badge').className = 'badge on'; el('ai-badge').textContent = 'AI ON'; }
+  if (d.embr_blob_enabled) { el('blob-badge').className = 'badge on'; el('blob-badge').textContent = 'Embr Blob'; }
+}).catch(() => {});
+
+// ── Deck list view ──
+async function renderDeckList() {
+  currentDeckId = null;
+  el('deck-view').style.display = 'none';
+  el('study-view').style.display = 'none';
+  el('decks-view').style.display = 'block';
+
+  const decks = await (await fetch(`${API}/decks`)).json();
+  el('decks-view').innerHTML = `
+    <div class="panel">
+      <h2>Your Decks</h2>
+      ${decks.map(d => `
+        <div class="deck-card" onclick="openDeck('${d.id}')">
+          <h3>${esc(d.title)}</h3>
+          <div class="meta">
+            ${esc(d.subject || 'No subject')} — ${d.card_count} cards
+            ${d.due_count > 0 ? `<span class="due">${d.due_count} due</span>` : ''}
+          </div>
+          <div class="meta">${esc(d.description)}</div>
+        </div>`).join('') || '<p>No decks yet.</p>'}
+    </div>
+    <div class="panel">
+      <h3>New deck</h3>
+      <form onsubmit="return newDeck(event)">
+        <input id="new-deck-title" placeholder="Title (e.g. Spanish Verbs)" required />
+        <input id="new-deck-subject" placeholder="Subject (optional)" />
+        <input id="new-deck-desc" placeholder="Description (optional)" />
+        <button class="btn primary" type="submit">Create deck</button>
+      </form>
+    </div>`;
+}
+
+async function newDeck(ev) {
+  ev.preventDefault();
+  const body = {
+    title: el('new-deck-title').value.trim(),
+    subject: el('new-deck-subject').value.trim(),
+    description: el('new-deck-desc').value.trim(),
+  };
+  if (!body.title) return false;
+  await fetch(`${API}/decks`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  renderDeckList();
+  return false;
+}
+
+// ── Deck detail view ──
+async function openDeck(id) {
+  currentDeckId = id;
+  const [deck, cards] = await Promise.all([
+    fetch(`${API}/decks/${id}`).then(r => r.json()),
+    fetch(`${API}/decks/${id}/cards`).then(r => r.json()),
+  ]);
+  el('decks-view').style.display = 'none';
+  el('study-view').style.display = 'none';
+  el('deck-view').style.display = 'block';
+  el('deck-view').innerHTML = `
+    <div class="panel">
+      <div class="row" style="justify-content: space-between">
+        <div>
+          <h2 style="margin: 0">${esc(deck.title)}</h2>
+          <div class="meta">${esc(deck.subject)} — ${deck.card_count} cards, ${deck.due_count} due</div>
+        </div>
+        <div>
+          <button class="btn primary" onclick="startStudy('${id}')" ${deck.due_count === 0 ? 'disabled' : ''}>Study ▶</button>
+          <button class="btn" onclick="renderDeckList()">← All decks</button>
+          <button class="btn danger" onclick="deleteDeck('${id}')">Delete deck</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h3>Add card manually</h3>
+      <form onsubmit="return addCard(event, '${id}')">
+        <input id="new-card-front" placeholder="Front (question)" required />
+        <textarea id="new-card-back" placeholder="Back (answer)" required></textarea>
+
+        <div class="hint">Optional image — pick a seed diagram or upload your own:</div>
+        <div class="seed-gallery" id="seed-gallery">
+          ${SEED_DIAGRAMS.map(url => `<img src="${url}" data-url="${url}" onclick="selectSeed(this)" title="${url.split('/').pop()}"/>`).join('')}
+        </div>
+        <div class="row" style="margin-top: 6px">
+          <input type="file" id="new-card-file" accept="image/*" onchange="clearSeedSelection()" />
+          <input type="hidden" id="new-card-image" />
+          <span id="new-card-image-label" class="hint"></span>
+        </div>
+        <div class="error" id="add-card-error"></div>
+        <button class="btn primary" type="submit" style="margin-top: 6px">Add card</button>
+      </form>
+    </div>
+
+    <div class="panel">
+      <h3>Generate cards with AI</h3>
+      <p class="hint">Paste a passage of study material — the app will turn it into Q/A cards.
+        ${/* mock by default */''}<em>(Mock output until <code>AZURE_OPENAI_*</code> env vars are set.)</em></p>
+      <form onsubmit="return aiGenerate(event, '${id}')">
+        <textarea id="ai-passage" placeholder="Paste your notes, textbook passage, or lecture transcript..." required></textarea>
+        <div class="row">
+          <label>Cards to generate:
+            <input type="number" id="ai-count" value="5" min="1" max="20" style="width:60px" />
+          </label>
+          <button class="btn primary" type="submit">AI Generate</button>
+        </div>
+        <div class="error" id="ai-error"></div>
+      </form>
+    </div>
+
+    <div class="panel">
+      <h3>Cards (${cards.length})</h3>
+      ${cards.map(c => `
+        <div class="card-item">
+          ${c.image_url ? `<img class="thumb" src="${esc(c.image_url)}" />` : '<div class="thumb"></div>'}
+          <div class="text">
+            <b>${esc(c.front_text)}</b>
+            <div style="color:#555">${esc(c.back_text.substring(0, 100))}${c.back_text.length > 100 ? '…' : ''}</div>
+            <div class="meta">Next review: ${c.next_review} • Ease: ${c.ease.toFixed(2)} • Interval: ${c.interval_days}d</div>
+          </div>
+          <div class="ctrls">
+            <button class="btn danger" onclick="deleteCard('${c.id}', '${id}')">✕</button>
+          </div>
+        </div>`).join('') || '<p>No cards yet. Add one above.</p>'}
+    </div>`;
+}
+
+function selectSeed(img) {
+  document.querySelectorAll('#seed-gallery img').forEach(i => i.classList.remove('selected'));
+  img.classList.add('selected');
+  el('new-card-image').value = img.dataset.url;
+  el('new-card-image-label').textContent = 'Selected: ' + img.dataset.url.split('/').pop();
+  el('new-card-file').value = '';
+}
+
+function clearSeedSelection() {
+  document.querySelectorAll('#seed-gallery img').forEach(i => i.classList.remove('selected'));
+  el('new-card-image').value = '';
+  el('new-card-image-label').textContent = '';
+}
+
+async function addCard(ev, deckId) {
+  ev.preventDefault();
+  el('add-card-error').textContent = '';
+  let imageUrl = el('new-card-image').value || null;
+  const file = el('new-card-file').files[0];
+  if (file) {
+    const fd = new FormData();
+    fd.append('file', file);
+    const res = await fetch(`${API}/images`, { method: 'POST', body: fd });
+    if (!res.ok) {
+      el('add-card-error').textContent = 'Upload failed: ' + (await res.text());
+      return false;
+    }
+    imageUrl = (await res.json()).url;
+  }
+  const body = {
+    front_text: el('new-card-front').value.trim(),
+    back_text: el('new-card-back').value.trim(),
+    image_url: imageUrl,
+  };
+  await fetch(`${API}/decks/${deckId}/cards`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  openDeck(deckId);
+  return false;
+}
+
+async function aiGenerate(ev, deckId) {
+  ev.preventDefault();
+  el('ai-error').textContent = '';
+  const body = {
+    passage: el('ai-passage').value.trim(),
+    count: parseInt(el('ai-count').value, 10) || 5,
+  };
+  const res = await fetch(`${API}/decks/${deckId}/ai-generate`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    el('ai-error').textContent = 'Failed: ' + (await res.text());
+    return false;
+  }
+  openDeck(deckId);
+  return false;
+}
+
+async function deleteCard(cardId, deckId) {
+  if (!confirm('Delete this card?')) return;
+  await fetch(`${API}/cards/${cardId}`, { method: 'DELETE' });
+  openDeck(deckId);
+}
+
+async function deleteDeck(id) {
+  if (!confirm('Delete this deck and all its cards?')) return;
+  await fetch(`${API}/decks/${id}`, { method: 'DELETE' });
+  renderDeckList();
+}
+
+// ── Study view ──
+async function startStudy(deckId) {
+  studyState = { deckId, showingBack: false, card: null };
+  el('decks-view').style.display = 'none';
+  el('deck-view').style.display = 'none';
+  el('study-view').style.display = 'block';
+  await loadNextCard();
+}
+
+async function loadNextCard() {
+  const data = await (await fetch(`${API}/decks/${studyState.deckId}/study/next`)).json();
+  studyState.card = data.card;
+  studyState.showingBack = false;
+  renderStudyCard(data.message);
+}
+
+function renderStudyCard(finishedMessage) {
+  const c = studyState.card;
+  if (!c) {
+    el('study-view').innerHTML = `
+      <div class="panel">
+        <h2>Session complete 🎉</h2>
+        <p>${esc(finishedMessage || 'No more cards due.')}</p>
+        <button class="btn" onclick="openDeck('${studyState.deckId}')">← Back to deck</button>
+        <button class="btn" onclick="renderDeckList()">All decks</button>
+      </div>`;
+    return;
+  }
+  const body = studyState.showingBack
+    ? `<h3>Answer</h3>
+       ${c.image_url ? `<img src="${esc(c.image_url)}" />` : ''}
+       <pre>${esc(c.back_text)}</pre>`
+    : `<h3>Question</h3>
+       <pre>${esc(c.front_text)}</pre>
+       ${c.image_url ? `<img src="${esc(c.image_url)}" />` : ''}`;
+  el('study-view').innerHTML = `
+    <div class="panel">
+      <div class="row" style="justify-content: space-between">
+        <h2 style="margin: 0">Study</h2>
+        <div>
+          <button class="btn" onclick="openDeck('${studyState.deckId}')">End session</button>
+        </div>
+      </div>
+    </div>
+    <div class="panel study-card">${body}
+      ${studyState.showingBack ? `
+        <div class="rating-row">
+          <button class="btn rating-again" onclick="rate('again')">Again</button>
+          <button class="btn rating-hard"  onclick="rate('hard')">Hard</button>
+          <button class="btn rating-good"  onclick="rate('good')">Good</button>
+          <button class="btn rating-easy"  onclick="rate('easy')">Easy</button>
+        </div>` :
+        `<div class="rating-row"><button class="btn primary" onclick="flipCard()">Show answer</button></div>`
+      }
+    </div>`;
+}
+
+function flipCard() { studyState.showingBack = true; renderStudyCard(); }
+
+async function rate(rating) {
+  const cardId = studyState.card.id;
+  await fetch(`${API}/cards/${cardId}/review`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ rating, username: username() }),
+  });
+  await Promise.all([refreshLeaderboard(), refreshStats()]);
+  await loadNextCard();
+}
+
+// ── Leaderboard & stats ──
+async function refreshLeaderboard() {
+  const entries = await (await fetch(`${API}/leaderboard`)).json();
+  const tbody = el('leaderboard-tbl').querySelector('tbody');
+  const me = username();
+  if (entries.length === 0) {
+    tbody.innerHTML = '';
+    el('no-reviews').style.display = 'block';
+    return;
+  }
+  el('no-reviews').style.display = 'none';
+  tbody.innerHTML = entries.map(e =>
+    `<tr class="${e.username === me ? 'me' : ''}"><td>${e.rank}</td><td>${esc(e.username)}</td><td style="text-align:right">${e.streak}🔥</td></tr>`
+  ).join('');
+}
+
+async function refreshStats() {
+  const data = await (await fetch(`${API}/stats?username=${encodeURIComponent(username())}`)).json();
+  el('me-streak').textContent = data.streak ? ` — ${data.streak}🔥` : '';
+}
+
+// ── Boot ──
+renderDeckList();
+refreshLeaderboard();
+refreshStats();
+</script>
+</body>
+</html>

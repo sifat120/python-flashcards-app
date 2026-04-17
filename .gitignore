@@ -1,0 +1,19 @@
+# Dependencies
+node_modules/
+__pycache__/
+*.pyc
+*.pyo
+.env
+
+# Uploads (local dev fallback — real uploads go to Azure Blob on Embr)
+backend/uploads/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+Thumbs.db
+.DS_Store

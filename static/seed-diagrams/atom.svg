@@ -1,0 +1,25 @@
+<svg viewBox="0 0 400 300" xmlns="http://www.w3.org/2000/svg">
+  <rect width="400" height="300" fill="#fff3e0"/>
+  <text x="10" y="22" font-family="serif" font-size="16" font-weight="bold">Atom Structure (Bohr Model)</text>
+  <!-- Orbits -->
+  <g fill="none" stroke="#ff9800" stroke-width="1.5">
+    <ellipse cx="200" cy="155" rx="55" ry="28"/>
+    <ellipse cx="200" cy="155" rx="100" ry="50"/>
+    <ellipse cx="200" cy="155" rx="140" ry="70" transform="rotate(30 200 155)"/>
+  </g>
+  <!-- Nucleus -->
+  <circle cx="200" cy="155" r="20" fill="#d84315" stroke="#bf360c" stroke-width="2"/>
+  <text x="184" y="159" font-family="serif" font-size="11" fill="#ffffff">Nucleus</text>
+  <!-- Electrons -->
+  <g fill="#1976d2">
+    <circle cx="255" cy="155" r="7"/>
+    <circle cx="300" cy="155" r="7"/>
+    <circle cx="100" cy="155" r="7"/>
+    <circle cx="145" cy="125" r="7"/>
+  </g>
+  <!-- Legend -->
+  <circle cx="30" cy="255" r="6" fill="#1976d2"/>
+  <text x="42" y="260" font-family="serif" font-size="11">= electron (e⁻)</text>
+  <circle cx="160" cy="255" r="6" fill="#d84315"/>
+  <text x="172" y="260" font-family="serif" font-size="11">= nucleus (protons + neutrons)</text>
+</svg>
