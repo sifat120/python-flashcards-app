@@ -297,6 +297,17 @@ def _build_db_store():
         db_url = "postgresql+psycopg://" + db_url[len("postgresql://") :]
 
     engine = create_engine(db_url, pool_pre_ping=True, future=True)
+    # SQLite ignores foreign keys unless you ask it to. Turn them on so local
+    # dev catches the same FK violations that Postgres would on Embr.
+    if engine.dialect.name == "sqlite":
+        from sqlalchemy import event
+
+        @event.listens_for(engine, "connect")
+        def _enable_sqlite_fk(dbapi_conn, _):  # noqa: ANN001
+            cur = dbapi_conn.cursor()
+            cur.execute("PRAGMA foreign_keys=ON")
+            cur.close()
+
     Base.metadata.create_all(engine)
     Session = sessionmaker(bind=engine, expire_on_commit=False, future=True)
 
@@ -338,6 +349,10 @@ def _build_db_store():
                         description=d.description, subject=d.subject,
                         created_at=d.created_at,
                     ))
+                # Flush decks first so the FK target rows exist before the
+                # cards INSERT — Postgres enforces FKs row-by-row, so a single
+                # combined flush would fail with cards_deck_id_fkey violations.
+                s.flush()
                 for c in cards:
                     s.add(_CardRow(
                         id=c.id, deck_id=c.deck_id,
