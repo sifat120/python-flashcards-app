@@ -179,6 +179,22 @@ def cache_delete(key: str) -> None:
     _ttl_store.pop(key, None)
 
 
+def cache_delete_many(keys: list[str]) -> None:
+    """Delete multiple cache keys in a single Redis round-trip.
+
+    Used by mutation endpoints that need to invalidate several related
+    cached responses (e.g. deck list + deck detail + deck cards) without
+    paying N round-trip penalties on managed Redis.
+    """
+    if not keys:
+        return
+    if _redis is not None:
+        _redis.delete(*[f"cache:{k}" for k in keys])
+        return
+    for k in keys:
+        _ttl_store.pop(k, None)
+
+
 # ── Rate limiting ────────────────────────────────────────────────────────────
 
 def rate_limit(key: str, max_requests: int, window_seconds: int) -> bool:

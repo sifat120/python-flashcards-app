@@ -7,12 +7,13 @@ to the storage / cache / blob / AI modules so this file stays scannable.
 
 from __future__ import annotations
 
+import json
 import logging
 from datetime import date
 from pathlib import Path
 
 from fastapi import FastAPI, File, HTTPException, Query, Request, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 
 # Configure logging before importing any module that might log at import time
 # (store.py, cache.py, blob.py all do backend selection on import).
@@ -35,6 +36,7 @@ from backend.models import (  # noqa: E402
     ImageUploadResult,
     LeaderboardEntry,
     ReviewInput,
+    ReviewResult,
     StatsOut,
 )
 from backend.scheduler import VALID_RATINGS, apply_review  # noqa: E402
@@ -70,6 +72,37 @@ async def health():
 
 # ── Decks ────────────────────────────────────────────────────────────────────
 
+# JSON-cache keys. We cache the rendered response payloads (not ORM objects)
+# so reads avoid Postgres entirely on cache hits. TTL is short to keep bugs
+# from latent staleness contained — invalidation is best-effort but explicit
+# below.
+_CACHE_TTL_SECONDS = 60
+_DECK_LIST_KEY = "decks:list"
+def _deck_detail_key(deck_id: str) -> str: return f"decks:detail:{deck_id}"
+def _deck_cards_key(deck_id: str) -> str: return f"decks:cards:{deck_id}"
+
+
+def _invalidate_deck(deck_id: str | None = None) -> None:
+    """Bust the deck-list cache plus (optionally) per-deck caches.
+    Pipelined into a single Redis round-trip so writes stay snappy."""
+    keys = [_DECK_LIST_KEY]
+    if deck_id:
+        keys.extend([_deck_detail_key(deck_id), _deck_cards_key(deck_id)])
+    cache.cache_delete_many(keys)
+
+
+def _cached_json(key: str, builder) -> JSONResponse:
+    """Return a JSONResponse from cache if present, otherwise build, store,
+    and return. ``builder`` is a zero-arg callable returning JSON-serialisable
+    data."""
+    hit = cache.cache_get(key)
+    if hit is not None:
+        return JSONResponse(content=json.loads(hit), headers={"X-Cache": "HIT"})
+    payload = builder()
+    cache.cache_set(key, json.dumps(payload, default=str), _CACHE_TTL_SECONDS)
+    return JSONResponse(content=payload, headers={"X-Cache": "MISS"})
+
+
 def _deck_to_out(deck, card_count: int | None = None, due_count: int | None = None) -> DeckOut:
     # When counts aren't provided, fall back to per-deck queries (used by
     # single-deck endpoints). The list endpoint passes pre-computed counts
@@ -89,29 +122,35 @@ def _deck_to_out(deck, card_count: int | None = None, due_count: int | None = No
     )
 
 
-@app.get("/api/decks", response_model=list[DeckOut])
+@app.get("/api/decks")
 async def list_decks():
-    decks = store.list_decks()
-    counts = store.deck_counts()
-    return [
-        _deck_to_out(d, *counts.get(d.id, (0, 0)))
-        for d in decks
-    ]
+    def build():
+        decks = store.list_decks()
+        counts = store.deck_counts()
+        return [
+            _deck_to_out(d, *counts.get(d.id, (0, 0))).model_dump(mode="json")
+            for d in decks
+        ]
+    return _cached_json(_DECK_LIST_KEY, build)
 
 
 @app.post("/api/decks", response_model=DeckOut, status_code=201)
 async def create_deck(data: DeckCreate):
     deck = store.create_deck(data)
+    _invalidate_deck(deck.id)
     logger.info("Created deck id=%s title=%r", deck.id, deck.title)
     return _deck_to_out(deck)
 
 
-@app.get("/api/decks/{deck_id}", response_model=DeckOut)
+@app.get("/api/decks/{deck_id}")
 async def get_deck(deck_id: str):
-    deck = store.get_deck(deck_id)
-    if deck is None:
-        raise HTTPException(404, "Deck not found")
-    return _deck_to_out(deck)
+    def build():
+        deck = store.get_deck(deck_id)
+        if deck is None:
+            raise HTTPException(404, "Deck not found")
+        counts = store.deck_counts().get(deck_id, (0, 0))
+        return _deck_to_out(deck, *counts).model_dump(mode="json")
+    return _cached_json(_deck_detail_key(deck_id), build)
 
 
 @app.put("/api/decks/{deck_id}", response_model=DeckOut)
@@ -119,6 +158,7 @@ async def update_deck(deck_id: str, data: DeckUpdate):
     deck = store.update_deck(deck_id, data)
     if deck is None:
         raise HTTPException(404, "Deck not found")
+    _invalidate_deck(deck_id)
     logger.info("Updated deck id=%s", deck_id)
     return _deck_to_out(deck)
 
@@ -127,16 +167,20 @@ async def update_deck(deck_id: str, data: DeckUpdate):
 async def delete_deck(deck_id: str):
     if not store.delete_deck(deck_id):
         raise HTTPException(404, "Deck not found")
+    _invalidate_deck(deck_id)
     logger.info("Deleted deck id=%s", deck_id)
 
 
 # ── Cards ────────────────────────────────────────────────────────────────────
 
-@app.get("/api/decks/{deck_id}/cards", response_model=list[CardOut])
+@app.get("/api/decks/{deck_id}/cards")
 async def list_cards(deck_id: str):
-    if store.get_deck(deck_id) is None:
-        raise HTTPException(404, "Deck not found")
-    return [c.to_out() for c in store.list_cards(deck_id)]
+    def build():
+        # No separate get_deck() round-trip — list_cards on a missing deck
+        # just returns []. Distinguishing "missing deck" from "empty deck"
+        # isn't worth a full DB query for every page-load.
+        return [c.to_out().model_dump(mode="json") for c in store.list_cards(deck_id)]
+    return _cached_json(_deck_cards_key(deck_id), build)
 
 
 @app.post("/api/decks/{deck_id}/cards", response_model=CardOut, status_code=201)
@@ -144,7 +188,7 @@ async def create_card(deck_id: str, data: CardCreate):
     card = store.create_card(deck_id, data)
     if card is None:
         raise HTTPException(404, "Deck not found")
-    cache.cache_delete(f"due:{deck_id}:{date.today().isoformat()}")
+    _invalidate_deck(deck_id)
     logger.info("Created card id=%s deck=%s", card.id, deck_id)
     return card.to_out()
 
@@ -154,13 +198,17 @@ async def update_card(card_id: str, data: CardUpdate):
     card = store.update_card(card_id, data)
     if card is None:
         raise HTTPException(404, "Card not found")
+    _invalidate_deck(card.deck_id)
     return card.to_out()
 
 
 @app.delete("/api/cards/{card_id}", status_code=204)
 async def delete_card(card_id: str):
+    card = store.get_card(card_id)
     if not store.delete_card(card_id):
         raise HTTPException(404, "Card not found")
+    if card is not None:
+        _invalidate_deck(card.deck_id)
     logger.info("Deleted card id=%s", card_id)
 
 
@@ -168,15 +216,15 @@ async def delete_card(card_id: str):
 
 @app.get("/api/decks/{deck_id}/study/next")
 async def next_due(deck_id: str):
-    if store.get_deck(deck_id) is None:
-        raise HTTPException(404, "Deck not found")
+    # No separate get_deck() round-trip — next_due_card returning None already
+    # covers both "deck missing" and "no cards due" with the same UX.
     card = store.next_due_card(deck_id)
     if card is None:
         return {"card": None, "message": "No cards due — come back later!"}
     return {"card": card.to_out()}
 
 
-@app.post("/api/cards/{card_id}/review", response_model=CardOut)
+@app.post("/api/cards/{card_id}/review", response_model=ReviewResult)
 async def review_card(card_id: str, data: ReviewInput):
     card = store.get_card(card_id)
     if card is None:
@@ -186,17 +234,31 @@ async def review_card(card_id: str, data: ReviewInput):
 
     apply_review(card, data.rating)
     store.save_card(card)
+    _invalidate_deck(card.deck_id)
 
     username = data.username.strip() or "anonymous"
     today_iso = date.today().isoformat()
     new_streak = cache.record_review(username, today_iso)
-    cache.cache_delete(f"due:{card.deck_id}:{today_iso}")
+
+    # Bundle everything the client needs (next card to study, refreshed
+    # streak/total, due-count for this deck) so the UI doesn't fire 3
+    # follow-up requests after every rating click. We use a single-deck
+    # due_count() (one COUNT query) instead of deck_counts() (GROUP BY across
+    # every deck) because we only need this one deck's number.
+    next_card = store.next_due_card(card.deck_id)
+    deck_due = store.due_count(card.deck_id)
 
     logger.debug(
         "Review applied card=%s rating=%s user=%s streak=%d next=%s",
         card.id, data.rating, username, new_streak, card.next_review,
     )
-    return card.to_out()
+    return ReviewResult(
+        card=card.to_out(),
+        next_card=next_card.to_out() if next_card else None,
+        streak=new_streak,
+        total_reviews=cache.get_total_reviews(username),
+        deck_due_count=deck_due,
+    )
 
 
 # ── AI generation ────────────────────────────────────────────────────────────
@@ -221,6 +283,7 @@ async def ai_generate(deck_id: str, data: AIGenerateInput, request: Request):
             deck_id,
             CardCreate(front_text=c["front_text"], back_text=c["back_text"]),
         )
+    _invalidate_deck(deck_id)
     logger.info(
         "AI generation deck=%s source=%s count=%d passage_chars=%d",
         deck_id, source, len(cards), len(data.passage),
@@ -285,13 +348,25 @@ async def get_leaderboard(top: int = Query(10, ge=1, le=100)):
 
 @app.get("/api/stats", response_model=StatsOut)
 async def get_stats(username: str = "anonymous"):
-    total_due = sum(store.due_count(d.id) for d in store.list_decks())
-    return StatsOut(
-        username=username,
-        streak=cache.get_streak(username),
-        total_reviews=cache.get_total_reviews(username),
-        cards_due_today=total_due,
-    )
+    # Short-lived per-user cache. Stats fire on every page load and after
+    # every review, so even a 15s TTL collapses bursts of requests into
+    # one DB query without making the leaderboard feel laggy.
+    safe_user = username.replace(":", "_")[:64] or "anonymous"
+    key = f"stats:{safe_user}:{date.today().isoformat()}"
+    def build():
+        total_due = sum(d for _, d in store.deck_counts().values())
+        return StatsOut(
+            username=username,
+            streak=cache.get_streak(username),
+            total_reviews=cache.get_total_reviews(username),
+            cards_due_today=total_due,
+        ).model_dump(mode="json")
+    hit = cache.cache_get(key)
+    if hit is not None:
+        return JSONResponse(content=json.loads(hit), headers={"X-Cache": "HIT"})
+    payload = build()
+    cache.cache_set(key, json.dumps(payload, default=str), 15)
+    return JSONResponse(content=payload, headers={"X-Cache": "MISS"})
 
 
 # ── Static frontend ──────────────────────────────────────────────────────────

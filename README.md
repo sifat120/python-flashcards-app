@@ -46,7 +46,7 @@ Open http://localhost:8008
 ## Features
 
 - **Decks & cards** — create, edit, delete; each card has front/back text plus an optional diagram
-- **Study mode** — SM-2-style spaced repetition (`again` / `hard` / `good` / `easy`)
+- **Study mode** — SM-2-style spaced repetition (`very_hard` / `hard` / `good` / `easy`)
 - **AI card generation** — paste a passage of study notes; mock by default, real Azure OpenAI when configured
 - **Diagrams** — pre-bundled SVG diagrams (cell, water cycle, atom, BST, linked list) so customers see real content instantly
 - **Custom image uploads** — drop in your own PNG/JPG/SVG per card
@@ -81,6 +81,13 @@ export DATABASE_URL="postgresql://user:pass@localhost:5432/flashcards"   # bash
 
 `backend/cache.py` connects to `REDIS_URL` (or `CACHE_URL`) at import time. If the connection succeeds, leaderboards / rate limits / TTL caches use Redis primitives (`ZADD`, `ZREVRANGE`, `INCR`, `EXPIRE`, `SETEX`). If no URL is set or the connection fails, the same operations run against in-memory dicts.
 
+The cache layer is responsible for:
+
+- **Streak leaderboard** — `ZADD`/`ZREVRANGE` on `leaderboard:streaks`.
+- **Per-user totals + last-review-day** — used by the streak rule.
+- **Rate limiting** — `INCR` + `EXPIRE` buckets for AI generation (20/hr) and image uploads (30/hr) per client IP.
+- **Response caching** — `GET /api/decks`, `GET /api/decks/{id}`, `GET /api/decks/{id}/cards`, and `GET /api/stats` are cached as JSON (60s TTL for deck endpoints, 15s for stats). Every mutation (deck/card create/update/delete, review, AI-generate) busts related keys via a single pipelined Redis `DEL`. Responses include an `X-Cache: HIT|MISS` header so you can verify cache behaviour in your browser's network tab.
+
 ### Blob storage
 
 Embr auto-provisions blob storage for every environment — no `embr.yaml` toggle needed. `backend/blob.py` selects its backend at import time:
@@ -93,6 +100,16 @@ Both paths enforce a 5 MB cap and an allow-list of `png/jpg/jpeg/webp/svg/gif`.
 ### AI
 
 The mock generator in `backend/ai_service.py` runs by default. To switch to Azure OpenAI, set `AZURE_OPENAI_*` variables (see [Setting your own](#setting-your-own-openai-key-third-party-apis)) and uncomment the `openai` line in `requirements.txt` and the real-implementation block in `ai_service.py`.
+
+## Performance
+
+The app is tuned to feel snappy on managed Postgres + Valkey (where each network round-trip is typically 50–200ms):
+
+- **Homepage load** — 3 parallel requests, all served from the response cache after the first hit.
+- **Click into a deck** — 2 parallel requests, both cached.
+- **Click a study rating** — a **single** `POST /api/cards/{id}/review` returns the updated card, the next card to study, the new streak, the user's total reviews, and the deck's remaining due count. No follow-up `/study/next`, `/api/stats`, or `/api/leaderboard` calls needed.
+- **Deck listing avoids N+1** — card counts and due counts are fetched in one `GROUP BY` query rather than one query per deck.
+- **Cache invalidation is pipelined** — writes bust the deck list + per-deck detail + per-deck cards keys in a single Redis `DEL`.
 
 ## Environment variables
 

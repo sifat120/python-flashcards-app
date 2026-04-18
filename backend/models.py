@@ -59,8 +59,21 @@ class CardOut(BaseModel):
 
 
 class ReviewInput(BaseModel):
-    rating: str  # "again" | "hard" | "good" | "easy"
+    rating: str  # "very_hard" | "hard" | "good" | "easy"
     username: str = "anonymous"
+
+
+class ReviewResult(BaseModel):
+    """Bundled response for POST /cards/{id}/review.
+
+    Returned in a single round-trip so the client doesn't need to follow up
+    with separate /study/next, /api/stats, and /api/leaderboard calls.
+    """
+    card: CardOut
+    next_card: Optional[CardOut] = None
+    streak: int
+    total_reviews: int
+    deck_due_count: int
 
 
 class AIGenerateInput(BaseModel):

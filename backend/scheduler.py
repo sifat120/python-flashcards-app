@@ -1,6 +1,6 @@
 """SM-2-style spaced repetition scheduler.
 
-Given a card and a rating (again/hard/good/easy), update its ease factor,
+Given a card and a rating (very_hard/hard/good/easy), update its ease factor,
 interval, and next-review date. A simplified variant of SuperMemo-2 suitable
 for the app; swap for Anki's full algorithm if needed.
 """
@@ -12,14 +12,15 @@ from datetime import date, datetime, timedelta, timezone
 from backend.models import CardRecord
 
 
-VALID_RATINGS = {"again", "hard", "good", "easy"}
+VALID_RATINGS = {"very_hard", "hard", "good", "easy"}
 
 
 def apply_review(card: CardRecord, rating: str) -> CardRecord:
     if rating not in VALID_RATINGS:
         raise ValueError(f"invalid rating: {rating}")
 
-    if rating == "again":
+    if rating == "very_hard":
+        # Treat as a near-failure — short interval, lower ease factor.
         card.interval_days = 1
         card.ease = max(1.3, card.ease - 0.2)
     elif rating == "hard":

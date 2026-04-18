@@ -401,7 +401,7 @@ function renderStudyCard(finishedMessage) {
       ${studyState.showingBack ? `
         <div class="hint" style="text-align:center; margin-top:8px">How well did you know this? Your rating decides when you'll see this card again.</div>
         <div class="rating-row">
-          <button class="btn rating-again" onclick="rate('again')" title="Didn't remember — show this card again very soon">Again</button>
+          <button class="btn rating-again" onclick="rate('very_hard')" title="Didn't really know it — show this card again very soon">Very Hard</button>
           <button class="btn rating-hard"  onclick="rate('hard')"  title="Got it, but it was tough — short interval">Hard</button>
           <button class="btn rating-good"  onclick="rate('good')"  title="Knew it — normal interval">Good</button>
           <button class="btn rating-easy"  onclick="rate('easy')"  title="Way too easy — long interval before next review">Easy</button>
@@ -415,12 +415,26 @@ function flipCard() { studyState.showingBack = true; renderStudyCard(); }
 
 async function rate(rating) {
   const cardId = studyState.card.id;
-  await fetch(`${API}/cards/${cardId}/review`, {
+  // Single round-trip: backend returns updated card + next due card +
+  // refreshed streak/total. Avoids 3 follow-up fetches per click.
+  const res = await fetch(`${API}/cards/${cardId}/review`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ rating, username: username() }),
   });
-  await Promise.all([refreshLeaderboard(), refreshStats()]);
-  await loadNextCard();
+  if (!res.ok) {
+    alert("Couldn't save your review. Try again.");
+    return;
+  }
+  const result = await res.json();
+
+  // Update streak pill from the bundled response (no /api/stats round-trip).
+  const meStreak = el('me-streak');
+  if (meStreak) meStreak.textContent = result.streak ? ` — ${result.streak}-day streak 🔥` : '';
+
+  // Move to the next card without an extra /study/next round-trip.
+  studyState.card = result.next_card;
+  studyState.showingBack = false;
+  renderStudyCard(result.next_card ? null : 'No more cards due — nice work!');
 }
 
 // ── Leaderboard & stats ──
