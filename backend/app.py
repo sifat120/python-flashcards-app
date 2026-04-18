@@ -58,6 +58,28 @@ logger.info(
 )
 
 
+@app.on_event("startup")
+async def _prewarm() -> None:
+    """Pre-warm the connection pool and the deck-list cache.
+
+    On a cold container start, the very first request would otherwise pay for
+    the Postgres TLS handshake plus the cold deck-list query. Doing this once
+    at boot means user-facing requests start with a hot pool and a cached
+    deck list, so the first click feels instant instead of taking ~500ms.
+    """
+    try:
+        decks = store.list_decks()
+        counts = store.deck_counts()
+        payload = [
+            _deck_to_out(d, *counts.get(d.id, (0, 0))).model_dump(mode="json")
+            for d in decks
+        ]
+        cache.cache_set(_DECK_LIST_KEY, json.dumps(payload, default=str), _CACHE_TTL_SECONDS)
+        logger.info("Pre-warmed deck-list cache (%d decks)", len(decks))
+    except Exception as e:  # pragma: no cover — defensive
+        logger.warning("Pre-warm skipped: %s", e)
+
+
 # ── Health ───────────────────────────────────────────────────────────────────
 
 @app.get("/api/health")
@@ -238,7 +260,7 @@ async def review_card(card_id: str, data: ReviewInput):
 
     username = data.username.strip() or "anonymous"
     today_iso = date.today().isoformat()
-    new_streak = cache.record_review(username, today_iso)
+    new_streak, total_reviews = cache.record_review(username, today_iso)
 
     # Bundle everything the client needs (next card to study, refreshed
     # streak/total, due-count for this deck) so the UI doesn't fire 3
@@ -256,7 +278,7 @@ async def review_card(card_id: str, data: ReviewInput):
         card=card.to_out(),
         next_card=next_card.to_out() if next_card else None,
         streak=new_streak,
-        total_reviews=cache.get_total_reviews(username),
+        total_reviews=total_reviews,
         deck_due_count=deck_due,
     )
 

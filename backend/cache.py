@@ -80,8 +80,11 @@ _rate_counters: dict[str, tuple[float, int]] = {}
 
 # ── Leaderboard ──────────────────────────────────────────────────────────────
 
-def record_review(username: str, review_day_iso: str) -> int:
-    """Update streak + total review count for a user; return new streak.
+def record_review(username: str, review_day_iso: str) -> tuple[int, int]:
+    """Update streak + total review count for a user.
+
+    Returns ``(new_streak, total_reviews)`` so callers don't need a follow-up
+    round-trip to fetch the total.
 
     Streak rules:
       - Same day as last review            → unchanged
@@ -91,19 +94,26 @@ def record_review(username: str, review_day_iso: str) -> int:
     if _redis is not None:
         prev_day_key = f"last_review:{username}"
         total_key = f"total:{username}"
-        prev_day = _redis.get(prev_day_key)
+        # Single round-trip: fetch prev_day + current zscore in one pipeline.
+        pipe = _redis.pipeline()
+        pipe.get(prev_day_key)
+        pipe.zscore(_LEADERBOARD_KEY, username)
+        prev_day, current_score = pipe.execute()
+
         if prev_day == review_day_iso:
-            new_streak = int(_redis.zscore(_LEADERBOARD_KEY, username) or 1)
+            new_streak = int(current_score or 1)
         elif prev_day and _day_delta(prev_day, review_day_iso) == 1:
-            new_streak = int(_redis.zscore(_LEADERBOARD_KEY, username) or 0) + 1
+            new_streak = int(current_score or 0) + 1
         else:
             new_streak = 1
+
+        # Single round-trip for the writes + the new total.
         pipe = _redis.pipeline()
         pipe.zadd(_LEADERBOARD_KEY, {username: new_streak})
         pipe.set(prev_day_key, review_day_iso)
         pipe.incr(total_key)
-        pipe.execute()
-        return new_streak
+        _, _, new_total = pipe.execute()
+        return new_streak, int(new_total)
 
     with _lock:
         _total_reviews[username] += 1
@@ -116,7 +126,7 @@ def record_review(username: str, review_day_iso: str) -> int:
             new_streak = 1
         _streaks[username] = new_streak
         _last_review_day[username] = review_day_iso
-        return new_streak
+        return new_streak, _total_reviews[username]
 
 
 def leaderboard(top_n: int = 10) -> list[tuple[str, int]]:

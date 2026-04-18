@@ -269,6 +269,7 @@ def _build_db_store():
         create_engine,
         func,
         select,
+        update as sql_update,
     )
     from sqlalchemy.orm import declarative_base, sessionmaker
 
@@ -308,7 +309,14 @@ def _build_db_store():
     if db_url.startswith("postgresql://"):
         db_url = "postgresql+psycopg://" + db_url[len("postgresql://") :]
 
-    engine = create_engine(db_url, pool_pre_ping=True, future=True)
+    engine = create_engine(
+        db_url,
+        pool_pre_ping=True,
+        pool_size=5,
+        max_overflow=5,
+        pool_recycle=1800,
+        future=True,
+    )
     # SQLite ignores foreign keys unless you ask it to. Turn them on so local
     # dev catches the same FK violations that Postgres would on Embr.
     if engine.dialect.name == "sqlite":
@@ -472,15 +480,22 @@ def _build_db_store():
                 return True
 
         def save_card(self, card: CardRecord) -> None:
-            """Persist mutations made to a CardRecord (e.g. by the SM-2 scheduler)."""
+            """Persist mutations made to a CardRecord (e.g. by the SM-2 scheduler).
+
+            Single UPDATE round-trip — we already have the full record in memory
+            from the calling handler, so there's no need to re-SELECT it first.
+            """
             with Session.begin() as s:
-                row = s.get(_CardRow, card.id)
-                if row is None:
-                    return
-                row.ease = card.ease
-                row.interval_days = card.interval_days
-                row.next_review = card.next_review
-                row.last_reviewed = card.last_reviewed
+                s.execute(
+                    sql_update(_CardRow)
+                    .where(_CardRow.id == card.id)
+                    .values(
+                        ease=card.ease,
+                        interval_days=card.interval_days,
+                        next_review=card.next_review,
+                        last_reviewed=card.last_reviewed,
+                    )
+                )
 
         def next_due_card(self, deck_id: str) -> Optional[CardRecord]:
             today = date.today()
