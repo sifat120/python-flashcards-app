@@ -1,18 +1,9 @@
-"""Cache, leaderboard, and rate limiting.
+"""Cache + streak leaderboard.
 
 Two interchangeable backends, picked at import time:
   - Redis backend → used when `REDIS_URL` (or `CACHE_URL`) is set
                     (managed Valkey on Embr).
   - Memory backend → used when no Redis URL is present (local dev / tests).
-
-Implements the same module-level functions in both modes so callers in
-`backend/app.py` don't care which backend is active:
-
-  - Leaderboard (sorted set)      — `leaderboard:streaks`
-  - Per-user totals               — `total:{username}`
-  - Last review day per user      — `last_review:{username}`
-  - TTL cache                     — `cache:{key}`
-  - Rate limit counters           — caller-supplied key (e.g. `ratelimit:ai:{ip}`)
 
 Embr injects `REDIS_URL` and `CACHE_URL` automatically when
 `cache.enabled: true` is set in `embr.yaml`.
@@ -75,7 +66,6 @@ _streaks: dict[str, int] = {}
 _last_review_day: dict[str, str] = {}
 _total_reviews: dict[str, int] = defaultdict(int)
 _ttl_store: dict[str, tuple[float, object]] = {}
-_rate_counters: dict[str, tuple[float, int]] = {}
 
 
 # ── Leaderboard ──────────────────────────────────────────────────────────────
@@ -203,28 +193,3 @@ def cache_delete_many(keys: list[str]) -> None:
         return
     for k in keys:
         _ttl_store.pop(k, None)
-
-
-# ── Rate limiting ────────────────────────────────────────────────────────────
-
-def rate_limit(key: str, max_requests: int, window_seconds: int) -> bool:
-    """Return True if the request is allowed, False if rate-limited."""
-    if _redis is not None:
-        # Atomic: INCR then EXPIRE on first hit. Pipeline isn't strictly atomic
-        # but the EXPIRE is idempotent so the worst case is the window resets
-        # one extra second after a race — acceptable for rate limiting.
-        pipe = _redis.pipeline()
-        pipe.incr(key)
-        pipe.expire(key, window_seconds, nx=True)
-        count, _ = pipe.execute()
-        return int(count) <= max_requests
-
-    now = time.time()
-    expires_at, count = _rate_counters.get(key, (0, 0))
-    if now > expires_at:
-        _rate_counters[key] = (now + window_seconds, 1)
-        return True
-    if count >= max_requests:
-        return False
-    _rate_counters[key] = (expires_at, count + 1)
-    return True

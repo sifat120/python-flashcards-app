@@ -6,7 +6,7 @@ import uuid
 from datetime import date, datetime, timezone
 from typing import Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 
 # ── Request / Response schemas ───────────────────────────────────────────────
@@ -36,13 +36,11 @@ class DeckOut(BaseModel):
 class CardCreate(BaseModel):
     front_text: str
     back_text: str
-    image_url: Optional[str] = None
 
 
 class CardUpdate(BaseModel):
     front_text: Optional[str] = None
     back_text: Optional[str] = None
-    image_url: Optional[str] = None
 
 
 class CardOut(BaseModel):
@@ -50,7 +48,6 @@ class CardOut(BaseModel):
     deck_id: str
     front_text: str
     back_text: str
-    image_url: Optional[str] = None
     ease: float
     interval_days: int
     next_review: str
@@ -64,31 +61,14 @@ class ReviewInput(BaseModel):
 
 
 class ReviewResult(BaseModel):
-    """Bundled response for POST /cards/{id}/review.
-
-    Returned in a single round-trip so the client doesn't need to follow up
-    with separate /study/next, /api/stats, and /api/leaderboard calls.
-    """
+    """Bundled response for POST /cards/{id}/review — the updated card,
+    the next card to study, refreshed streak/total, and the deck's remaining
+    due count, all in a single round-trip."""
     card: CardOut
     next_card: Optional[CardOut] = None
     streak: int
     total_reviews: int
     deck_due_count: int
-
-
-class AIGenerateInput(BaseModel):
-    passage: str
-    count: int = 5
-
-
-class AIGenerateResult(BaseModel):
-    cards: list[dict]
-    source: str  # "mock" or "azure_openai"
-
-
-class ImageUploadResult(BaseModel):
-    key: str
-    url: str
 
 
 class LeaderboardEntry(BaseModel):
@@ -104,8 +84,7 @@ class StatsOut(BaseModel):
     cards_due_today: int
 
 
-# ── In-memory record classes (used in both in-memory and DB-backed modes;
-#    backend/store.py builds these from query rows when DATABASE_URL is set) ──
+# ── Record classes used by both in-memory and DB-backed stores ──────────────
 
 class DeckRecord:
     def __init__(self, title: str, description: str = "", subject: str = ""):
@@ -117,18 +96,11 @@ class DeckRecord:
 
 
 class CardRecord:
-    def __init__(
-        self,
-        deck_id: str,
-        front_text: str,
-        back_text: str,
-        image_url: Optional[str] = None,
-    ):
+    def __init__(self, deck_id: str, front_text: str, back_text: str):
         self.id = uuid.uuid4().hex[:10]
         self.deck_id = deck_id
         self.front_text = front_text
         self.back_text = back_text
-        self.image_url = image_url
         self.ease: float = 2.5
         self.interval_days: int = 0
         self.next_review: date = date.today()
@@ -143,7 +115,6 @@ class CardRecord:
             deck_id=self.deck_id,
             front_text=self.front_text,
             back_text=self.back_text,
-            image_url=self.image_url,
             ease=self.ease,
             interval_days=self.interval_days,
             next_review=self.next_review.isoformat(),

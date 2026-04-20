@@ -40,26 +40,12 @@ _SEED_DECKS = [
         "description": "Intro-level cell biology and ecology.",
         "subject": "Biology",
         "cards": [
-            {
-                "front": "What is the basic structural and functional unit of life?",
-                "back": "The cell — the smallest unit of life capable of carrying out all life processes.",
-                "image": "/seed-diagrams/cell-structure.svg",
-            },
-            {
-                "front": "What is the equation for photosynthesis?",
-                "back": "6 CO₂ + 6 H₂O + light energy → C₆H₁₂O₆ + 6 O₂\n\n(Carbon dioxide + water → glucose + oxygen)",
-                "image": None,
-            },
-            {
-                "front": "What drives the water cycle?",
-                "back": "Solar energy. The sun evaporates water from oceans and lakes; it condenses into clouds and returns as precipitation.",
-                "image": "/seed-diagrams/water-cycle.svg",
-            },
-            {
-                "front": "Which organelle is the 'powerhouse of the cell'?",
-                "back": "The mitochondrion — it produces ATP (cellular energy) via oxidative phosphorylation.",
-                "image": None,
-            },
+            {"front": "What is the basic structural and functional unit of life?",
+             "back": "The cell — the smallest unit of life capable of carrying out all life processes."},
+            {"front": "What is the equation for photosynthesis?",
+             "back": "6 CO₂ + 6 H₂O + light energy → C₆H₁₂O₆ + 6 O₂\n\n(Carbon dioxide + water → glucose + oxygen)"},
+            {"front": "Which organelle is the 'powerhouse of the cell'?",
+             "back": "The mitochondrion — it produces ATP (cellular energy) via oxidative phosphorylation."},
         ],
     },
     {
@@ -67,21 +53,12 @@ _SEED_DECKS = [
         "description": "Common data structures every programmer should know.",
         "subject": "Computer Science",
         "cards": [
-            {
-                "front": "What is a Binary Search Tree (BST)?",
-                "back": "A binary tree where each node's left subtree contains only smaller values and the right subtree only larger values.",
-                "image": "/seed-diagrams/binary-tree.svg",
-            },
-            {
-                "front": "What is the average-case time complexity of search, insert, and delete in a balanced BST?",
-                "back": "O(log n) — because the tree's height grows logarithmically with the number of nodes.\n\nWorst case (unbalanced): O(n).",
-                "image": None,
-            },
-            {
-                "front": "What is a Linked List?",
-                "back": "A linear data structure where each element (node) stores data plus a pointer to the next node. O(1) insert/delete at the head, O(n) random access.",
-                "image": "/seed-diagrams/linked-list.svg",
-            },
+            {"front": "What is a Binary Search Tree (BST)?",
+             "back": "A binary tree where each node's left subtree contains only smaller values and the right subtree only larger values."},
+            {"front": "What is the average-case time complexity of search, insert, and delete in a balanced BST?",
+             "back": "O(log n) — because the tree's height grows logarithmically with the number of nodes.\n\nWorst case (unbalanced): O(n)."},
+            {"front": "What is a Linked List?",
+             "back": "A linear data structure where each element (node) stores data plus a pointer to the next node. O(1) insert/delete at the head, O(n) random access."},
         ],
     },
     {
@@ -89,21 +66,12 @@ _SEED_DECKS = [
         "description": "Foundational chemistry concepts.",
         "subject": "Chemistry",
         "cards": [
-            {
-                "front": "Describe the Bohr model of the atom.",
-                "back": "Electrons orbit a central nucleus (containing protons and neutrons) in fixed energy levels or shells.",
-                "image": "/seed-diagrams/atom.svg",
-            },
-            {
-                "front": "What is the atomic number of an element?",
-                "back": "The number of protons in an atom's nucleus. It uniquely identifies the element on the periodic table.",
-                "image": None,
-            },
-            {
-                "front": "What is the molecular formula for water, and what bonds hold it together?",
-                "back": "H₂O — two hydrogen atoms covalently bonded to one oxygen atom. Water molecules also form hydrogen bonds with each other.",
-                "image": None,
-            },
+            {"front": "Describe the Bohr model of the atom.",
+             "back": "Electrons orbit a central nucleus (containing protons and neutrons) in fixed energy levels or shells."},
+            {"front": "What is the atomic number of an element?",
+             "back": "The number of protons in an atom's nucleus. It uniquely identifies the element on the periodic table."},
+            {"front": "What is the molecular formula for water, and what bonds hold it together?",
+             "back": "H₂O — two hydrogen atoms covalently bonded to one oxygen atom. Water molecules also form hydrogen bonds with each other."},
         ],
     },
 ]
@@ -121,14 +89,7 @@ def _seed_records() -> tuple[list[DeckRecord], list[CardRecord]]:
         )
         decks.append(deck)
         for c in deck_data["cards"]:
-            cards.append(
-                CardRecord(
-                    deck_id=deck.id,
-                    front_text=c["front"],
-                    back_text=c["back"],
-                    image_url=c.get("image"),
-                )
-            )
+            cards.append(CardRecord(deck.id, c["front"], c["back"]))
     return decks, cards
 
 
@@ -194,7 +155,7 @@ class _MemoryStore:
         with self._lock:
             if deck_id not in self._decks:
                 return None
-            card = CardRecord(deck_id, data.front_text, data.back_text, data.image_url)
+            card = CardRecord(deck_id, data.front_text, data.back_text)
             self._cards[card.id] = card
             self._cards_by_deck[deck_id].append(card.id)
             return card
@@ -215,8 +176,6 @@ class _MemoryStore:
                 card.front_text = data.front_text
             if data.back_text is not None:
                 card.back_text = data.back_text
-            if data.image_url is not None:
-                card.image_url = data.image_url or None
             return card
 
     def delete_card(self, card_id: str) -> bool:
@@ -294,7 +253,6 @@ def _build_db_store():
         )
         front_text = Column(String, nullable=False)
         back_text = Column(String, nullable=False)
-        image_url = Column(String, nullable=True)
         ease = Column(Float, nullable=False, default=2.5)
         interval_days = Column(Integer, nullable=False, default=0)
         next_review = Column(Date, nullable=False)
@@ -346,7 +304,6 @@ def _build_db_store():
         c.deck_id = row.deck_id
         c.front_text = row.front_text
         c.back_text = row.back_text
-        c.image_url = row.image_url
         c.ease = float(row.ease)
         c.interval_days = int(row.interval_days)
         c.next_review = row.next_review
@@ -377,7 +334,6 @@ def _build_db_store():
                     s.add(_CardRow(
                         id=c.id, deck_id=c.deck_id,
                         front_text=c.front_text, back_text=c.back_text,
-                        image_url=c.image_url,
                         ease=c.ease, interval_days=c.interval_days,
                         next_review=c.next_review,
                         last_reviewed=c.last_reviewed,
@@ -434,11 +390,10 @@ def _build_db_store():
             with Session.begin() as s:
                 if s.get(_DeckRow, deck_id) is None:
                     return None
-                card = CardRecord(deck_id, data.front_text, data.back_text, data.image_url)
+                card = CardRecord(deck_id, data.front_text, data.back_text)
                 s.add(_CardRow(
                     id=card.id, deck_id=card.deck_id,
                     front_text=card.front_text, back_text=card.back_text,
-                    image_url=card.image_url,
                     ease=card.ease, interval_days=card.interval_days,
                     next_review=card.next_review,
                     last_reviewed=card.last_reviewed,
@@ -466,8 +421,6 @@ def _build_db_store():
                     row.front_text = data.front_text
                 if data.back_text is not None:
                     row.back_text = data.back_text
-                if data.image_url is not None:
-                    row.image_url = data.image_url or None
                 s.flush()
                 return _to_card(row)
 

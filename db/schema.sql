@@ -16,7 +16,6 @@ CREATE TABLE IF NOT EXISTS cards (
     deck_id       TEXT        NOT NULL REFERENCES decks(id) ON DELETE CASCADE,
     front_text    TEXT        NOT NULL,
     back_text     TEXT        NOT NULL,
-    image_url     TEXT,
     ease          DOUBLE PRECISION NOT NULL DEFAULT 2.5,
     interval_days INTEGER     NOT NULL DEFAULT 0,
     next_review   DATE        NOT NULL,

@@ -1,7 +1,5 @@
 fastapi>=0.110,<1
-gunicorn>=21,<24
-a2wsgi>=1.7,<2
-python-multipart>=0.0.9,<1
+uvicorn[standard]>=0.27,<1
 
 # Managed Postgres (auto-used when DATABASE_URL is set; see backend/store.py)
 sqlalchemy>=2.0,<3
@@ -9,9 +7,3 @@ psycopg[binary]>=3.1,<4
 
 # Managed Valkey/Redis cache (auto-used when REDIS_URL is set; see backend/cache.py)
 redis>=5.0,<6
-
-# Uncomment to enable real AI generation (otherwise a mock generator is used):
-# openai>=1.12
-
-# Uncomment for direct Azure Blob Storage uploads (otherwise local /uploads dir):
-# azure-storage-blob>=12.19
