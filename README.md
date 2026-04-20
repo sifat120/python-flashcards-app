@@ -15,7 +15,7 @@ platform: python
 platformVersion: "3.14"
 run:
   port: 8080
-  startCommand: uvicorn backend.app:app --host 0.0.0.0 --port $PORT
+  startCommand: "python -m uvicorn backend.app:app --host 0.0.0.0 --port 8080"
 database:
   enabled: true
 cache:
