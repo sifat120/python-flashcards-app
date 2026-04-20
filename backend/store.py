@@ -200,6 +200,16 @@ class _MemoryStore:
     def due_count(self, deck_id: str) -> int:
         return sum(1 for c in self.list_cards(deck_id) if c.is_due())
 
+    def deck_counts_for(self, deck_id: str) -> tuple[int, int]:
+        cards = self.list_cards(deck_id)
+        return (len(cards), sum(1 for c in cards if c.is_due()))
+
+    def next_and_due_count(self, deck_id: str) -> tuple[Optional[CardRecord], int]:
+        cards = self.list_cards(deck_id)
+        due = [c for c in cards if c.is_due()]
+        nxt = min(due, key=lambda c: c.next_review) if due else None
+        return (nxt, len(due))
+
     def deck_counts(self) -> dict[str, tuple[int, int]]:
         """Return ``{deck_id: (card_count, due_count)}`` for every deck in a
         single pass. Used by the deck-list endpoint to avoid N+1 queries."""
@@ -269,7 +279,8 @@ def _build_db_store():
 
     engine = create_engine(
         db_url,
-        pool_pre_ping=True,
+        # No pool_pre_ping: it issues a SELECT 1 on every checkout, adding a
+        # round-trip to every request. pool_recycle keeps connections fresh.
         pool_size=5,
         max_overflow=5,
         pool_recycle=1800,
@@ -470,6 +481,40 @@ def _build_db_store():
                         _CardRow.next_review <= today,
                     )
                 ).scalar_one() or 0)
+
+        def deck_counts_for(self, deck_id: str) -> tuple[int, int]:
+            """Single-query (card_count, due_count) for one deck. Used by
+            get_deck so we don't pay for a GROUP BY across every deck just
+            to extract one row."""
+            today = date.today()
+            with Session() as s:
+                row = s.execute(
+                    select(
+                        func.count(_CardRow.id),
+                        func.sum(case((_CardRow.next_review <= today, 1), else_=0)),
+                    ).where(_CardRow.deck_id == deck_id)
+                ).one()
+            return (int(row[0] or 0), int(row[1] or 0))
+
+        def next_and_due_count(self, deck_id: str) -> tuple[Optional[CardRecord], int]:
+            """Single round-trip helper for the /review path: returns the
+            next due card plus the deck's remaining due count, in one
+            session/transaction (one TCP RTT instead of two)."""
+            today = date.today()
+            with Session() as s:
+                next_row = s.execute(
+                    select(_CardRow)
+                    .where(_CardRow.deck_id == deck_id, _CardRow.next_review <= today)
+                    .order_by(_CardRow.next_review)
+                    .limit(1)
+                ).scalar_one_or_none()
+                due = int(s.execute(
+                    select(func.count(_CardRow.id)).where(
+                        _CardRow.deck_id == deck_id,
+                        _CardRow.next_review <= today,
+                    )
+                ).scalar_one() or 0)
+            return (_to_card(next_row) if next_row else None, due)
 
         def deck_counts(self) -> dict[str, tuple[int, int]]:
             """Single-query batch fetch of (card_count, due_count) per deck.

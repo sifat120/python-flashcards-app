@@ -52,6 +52,7 @@
 
   .hint { font-size: .8rem; color: #666; }
   .error { color: #b71c1c; font-size: .85rem; margin-top: 4px; }
+  .stale { opacity: .65; }
 </style>
 </head>
 <body>
@@ -92,11 +93,14 @@
 
 <script>
 const API = '/api';
+const DECK_LIST_LS_KEY = 'flashcards_decks_v1';
 
 const el = id => document.getElementById(id);
 const esc = s => { const d = document.createElement('div'); d.textContent = s ?? ''; return d.innerHTML; };
 
 let currentDeckId = null;
+// studyState carries a look-ahead `next` so each rating click can render
+// instantly — no waiting on the network for the next card.
 let studyState = null;
 
 // ── Username (used as a leaderboard handle, stored locally) ──
@@ -107,14 +111,9 @@ el('me-input').addEventListener('change', () => {
   refreshLeaderboard(); refreshStats();
 });
 
-// ── Deck list view ──
-async function renderDeckList() {
-  currentDeckId = null;
-  el('deck-view').style.display = 'none';
-  el('study-view').style.display = 'none';
-  el('decks-view').style.display = 'block';
-
-  el('decks-view').innerHTML = `
+// ── Deck list view (stale-while-revalidate from localStorage) ──
+function deckListFormShell() {
+  return `
     <div class="panel">
       <h3>Create a new deck</h3>
       <p class="hint">Group related cards together (e.g. "Spanish Verbs", "AP Biology Chapter 3").</p>
@@ -124,12 +123,59 @@ async function renderDeckList() {
         <input id="new-deck-desc" placeholder="Description (optional)" />
         <button class="btn primary" type="submit">Create deck</button>
       </form>
-    </div>
-    <div class="panel" id="decks-panel">
-      <h2>Your Decks</h2>
-      <div class="hint">Loading…</div>
     </div>`;
+}
 
+function renderDeckListPanel(decks, opts) {
+  opts = opts || {};
+  const totalDue = decks.reduce((n, d) => n + (d.due_count || 0), 0);
+  return `
+    <div class="panel ${opts.stale ? 'stale' : ''}" id="decks-panel">
+      <h2>Your Decks${opts.stale ? ' <span class="hint">(refreshing…)</span>' : ''}</h2>
+      <div class="hint" style="margin-bottom:10px">
+        Click a deck to study it or add new cards.
+        ${decks.length
+          ? `You have <b>${totalDue}</b> card(s) due across all decks today.`
+          : 'Use the form above to create your first deck.'}
+      </div>
+      ${decks.map(d => `
+        <div class="deck-card"
+             onclick="openDeck('${d.id}')"
+             onmouseenter="prefetchDeck('${d.id}')"
+             ontouchstart="prefetchDeck('${d.id}')">
+          <h3>${esc(d.title)}</h3>
+          <div class="meta">
+            ${esc(d.subject || 'No subject')} — ${d.card_count} cards
+            ${d.due_count > 0 ? `<span class="due">${d.due_count} due</span>` : ''}
+          </div>
+          <div class="meta">${esc(d.description)}</div>
+        </div>`).join('') || '<p class="hint">No decks yet.</p>'}
+    </div>`;
+}
+
+async function renderDeckList() {
+  currentDeckId = null;
+  el('deck-view').style.display = 'none';
+  el('study-view').style.display = 'none';
+  el('decks-view').style.display = 'block';
+
+  // 1. Paint cached decks instantly so the user sees something on first frame.
+  const cached = (() => {
+    try { return JSON.parse(localStorage.getItem(DECK_LIST_LS_KEY) || 'null'); }
+    catch { return null; }
+  })();
+
+  if (cached && Array.isArray(cached) && cached.length > 0) {
+    el('decks-view').innerHTML = deckListFormShell() + renderDeckListPanel(cached, { stale: true });
+  } else {
+    el('decks-view').innerHTML = deckListFormShell() + `
+      <div class="panel" id="decks-panel">
+        <h2>Your Decks</h2>
+        <div class="hint">Loading…</div>
+      </div>`;
+  }
+
+  // 2. Fetch fresh in the background and replace.
   let decks;
   try {
     const res = await fetch(`${API}/decks`);
@@ -137,30 +183,22 @@ async function renderDeckList() {
     decks = await res.json();
     if (!Array.isArray(decks)) throw new Error('Unexpected response from server');
   } catch (e) {
-    el('decks-panel').innerHTML = `
-      <h2>Your Decks</h2>
-      <div class="error">Couldn't load decks (${esc(e.message)}). Try refreshing the page.</div>`;
+    if (!cached) {
+      el('decks-panel').outerHTML = `
+        <div class="panel" id="decks-panel">
+          <h2>Your Decks</h2>
+          <div class="error">Couldn't load decks (${esc(e.message)}). Try refreshing the page.</div>
+        </div>`;
+    }
     return;
   }
 
-  const totalDue = decks.reduce((n, d) => n + (d.due_count || 0), 0);
-  el('decks-panel').innerHTML = `
-    <h2>Your Decks</h2>
-    <div class="hint" style="margin-bottom:10px">
-      Click a deck to study it or add new cards.
-      ${decks.length
-        ? `You have <b>${totalDue}</b> card(s) due across all decks today.`
-        : 'Use the form above to create your first deck.'}
-    </div>
-    ${decks.map(d => `
-      <div class="deck-card" onclick="openDeck('${d.id}')">
-        <h3>${esc(d.title)}</h3>
-        <div class="meta">
-          ${esc(d.subject || 'No subject')} — ${d.card_count} cards
-          ${d.due_count > 0 ? `<span class="due">${d.due_count} due</span>` : ''}
-        </div>
-        <div class="meta">${esc(d.description)}</div>
-      </div>`).join('') || '<p class="hint">No decks yet.</p>'}`;
+  try { localStorage.setItem(DECK_LIST_LS_KEY, JSON.stringify(decks)); } catch {}
+  // Only re-render if we're still on the deck list (user may have clicked away).
+  if (el('decks-view').style.display !== 'none') {
+    const panel = el('decks-panel');
+    if (panel) panel.outerHTML = renderDeckListPanel(decks);
+  }
 }
 
 async function newDeck(ev) {
@@ -172,8 +210,18 @@ async function newDeck(ev) {
   };
   if (!body.title) return false;
   await fetch(`${API}/decks`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  localStorage.removeItem(DECK_LIST_LS_KEY);
   renderDeckList();
   return false;
+}
+
+// ── Hover-prefetch: warm the browser HTTP cache before the click ──
+const _prefetched = new Set();
+function prefetchDeck(id) {
+  if (_prefetched.has(id)) return;
+  _prefetched.add(id);
+  fetch(`${API}/decks/${id}`).catch(() => {});
+  fetch(`${API}/decks/${id}/cards`).catch(() => {});
 }
 
 // ── Deck detail view ──
@@ -240,6 +288,8 @@ async function addCard(ev, deckId) {
     el('add-card-error').textContent = 'Failed to add card.';
     return false;
   }
+  localStorage.removeItem(DECK_LIST_LS_KEY);
+  _prefetched.delete(deckId);
   openDeck(deckId);
   return false;
 }
@@ -247,33 +297,35 @@ async function addCard(ev, deckId) {
 async function deleteCard(cardId, deckId) {
   if (!confirm('Delete this card?')) return;
   await fetch(`${API}/cards/${cardId}`, { method: 'DELETE' });
+  localStorage.removeItem(DECK_LIST_LS_KEY);
+  _prefetched.delete(deckId);
   openDeck(deckId);
 }
 
 async function deleteDeck(id) {
   if (!confirm('Delete this deck and all its cards?')) return;
   await fetch(`${API}/decks/${id}`, { method: 'DELETE' });
+  localStorage.removeItem(DECK_LIST_LS_KEY);
+  _prefetched.delete(id);
   renderDeckList();
 }
 
-// ── Study view ──
+// ── Study view (with look-ahead so rating clicks render instantly) ──
 async function startStudy(deckId) {
-  studyState = { deckId, showingBack: false, card: null };
+  studyState = { deckId, showingBack: false, current: null, next: null };
   el('decks-view').style.display = 'none';
   el('deck-view').style.display = 'none';
   el('study-view').style.display = 'block';
-  await loadNextCard();
-}
+  el('study-view').innerHTML = `<div class="panel"><div class="hint">Loading…</div></div>`;
 
-async function loadNextCard() {
-  const data = await (await fetch(`${API}/decks/${studyState.deckId}/study/next`)).json();
-  studyState.card = data.card;
-  studyState.showingBack = false;
+  const data = await (await fetch(`${API}/decks/${deckId}/study/next`)).json();
+  studyState.current = data.card;
+  studyState.next = data.next_card || null;
   renderStudyCard(data.message);
 }
 
 function renderStudyCard(finishedMessage) {
-  const c = studyState.card;
+  const c = studyState.current;
   if (!c) {
     el('study-view').innerHTML = `
       <div class="panel">
@@ -282,6 +334,7 @@ function renderStudyCard(finishedMessage) {
         <button class="btn" onclick="openDeck('${studyState.deckId}')">← Back to deck</button>
         <button class="btn" onclick="renderDeckList()">All decks</button>
       </div>`;
+    refreshLeaderboard();
     return;
   }
   const body = studyState.showingBack
@@ -292,7 +345,7 @@ function renderStudyCard(finishedMessage) {
       <div class="row" style="justify-content: space-between">
         <h2 style="margin: 0">Study</h2>
         <div>
-          <button class="btn" onclick="openDeck('${studyState.deckId}')">End session</button>
+          <button class="btn" onclick="endStudy()">End session</button>
         </div>
       </div>
     </div>
@@ -312,27 +365,59 @@ function renderStudyCard(finishedMessage) {
 
 function flipCard() { studyState.showingBack = true; renderStudyCard(); }
 
+function endStudy() {
+  // Make sure the deck list is fresh next time it's opened.
+  localStorage.removeItem(DECK_LIST_LS_KEY);
+  _prefetched.delete(studyState.deckId);
+  openDeck(studyState.deckId);
+}
+
 async function rate(rating) {
-  const cardId = studyState.card.id;
-  // Single round-trip: backend returns updated card + next due card +
-  // refreshed streak/total. Avoids 3 follow-up fetches per click.
-  const res = await fetch(`${API}/cards/${cardId}/review`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ rating, username: username() }),
-  });
-  if (!res.ok) {
-    alert("Couldn't save your review. Try again.");
+  const ratedId = studyState.current.id;
+  const me = username();
+
+  // 1. Optimistic advance — render the look-ahead card immediately.
+  studyState.current = studyState.next;
+  studyState.next = null;
+  studyState.showingBack = false;
+  renderStudyCard(studyState.current ? null : 'Saving review…');
+
+  // 2. Fire the POST in the background. When it returns, refresh the
+  // streak pill and stash the new look-ahead.
+  let result;
+  try {
+    const res = await fetch(`${API}/cards/${ratedId}/review`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ rating, username: me }),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    result = await res.json();
+  } catch (e) {
+    alert("Couldn't save your review. The next card will load shortly.");
     return;
   }
-  const result = await res.json();
 
   const meStreak = el('me-streak');
   if (meStreak) meStreak.textContent = result.streak ? ` — ${result.streak}-day streak 🔥` : '';
 
-  studyState.card = result.next_card;
-  studyState.showingBack = false;
-  renderStudyCard(result.next_card ? null : 'No more cards due — nice work!');
-  refreshLeaderboard();
+  // The server's `next_card` is now the card AFTER the one we already
+  // optimistically advanced to. Stash it as the new look-ahead.
+  studyState.next = result.next_card || null;
+
+  // If we optimistically advanced into "no card" (look-ahead was null) but
+  // the server actually has another due card — render it now.
+  if (!studyState.current && studyState.next) {
+    studyState.current = studyState.next;
+    studyState.next = null;
+    studyState.showingBack = false;
+    renderStudyCard();
+  } else if (!studyState.current && !studyState.next) {
+    renderStudyCard('No more cards due — nice work!');
+  }
+
+  // Deck list may have new due counts — drop the localStorage cache so the
+  // next visit re-fetches.
+  localStorage.removeItem(DECK_LIST_LS_KEY);
 }
 
 // ── Leaderboard & stats ──
