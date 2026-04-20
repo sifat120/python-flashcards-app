@@ -1,5 +1,6 @@
 fastapi>=0.110,<1
-uvicorn[standard]>=0.27,<1
+gunicorn>=21,<24
+a2wsgi>=1.7,<2
 
 # Managed Postgres (auto-used when DATABASE_URL is set; see backend/store.py)
 sqlalchemy>=2.0,<3

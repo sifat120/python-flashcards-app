@@ -4,7 +4,6 @@ platformVersion: "3.14"
 
 run:
   port: 8080
-  startCommand: "python -m uvicorn backend.app:app --host 0.0.0.0 --port 8080"
 
 # Managed Postgres — Embr injects DATABASE_URL and runs db/schema.sql on deploy.
 database:

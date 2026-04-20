@@ -15,7 +15,6 @@ platform: python
 platformVersion: "3.14"
 run:
   port: 8080
-  startCommand: "python -m uvicorn backend.app:app --host 0.0.0.0 --port 8080"
 database:
   enabled: true
 cache:
@@ -27,16 +26,17 @@ healthCheck:
 
 Connect this repo in the [Embr Portal](https://portal.embr.azure) and Embr will:
 
-1. Install dependencies from `requirements.txt` (FastAPI, uvicorn, SQLAlchemy, psycopg, redis).
+1. Install dependencies from `requirements.txt` (FastAPI, gunicorn, a2wsgi, SQLAlchemy, psycopg, redis).
 2. Provision Postgres, run `db/schema.sql`, and inject `DATABASE_URL`.
 3. Provision Valkey and inject `REDIS_URL` / `CACHE_URL`.
-4. Start the server and health-check `GET /api/health`.
+4. Auto-detect [`application.py`](application.py) and launch the app with gunicorn.
+5. Start health-checking `GET /api/health`.
 
 ## Run locally
 
 ```bash
 pip install -r requirements.txt
-uvicorn backend.app:app --reload --port 8008
+gunicorn --bind 0.0.0.0:8008 --reload application:app
 ```
 
 Open http://localhost:8008
