@@ -14,5 +14,5 @@ cache:
   enabled: true
 
 healthCheck:
-  path: /api/health
+  path: /api/health​
   expectedStatusCode: 200
